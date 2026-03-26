@@ -14,22 +14,35 @@ The `session` scheme enables high-frequency, pay-as-you-go payments over unidire
 
 The `exact` scheme settles every request onchain. This is appropriate for one-off purchases but introduces per-request latency and gas costs that become prohibitive at scale. The `session` scheme amortizes onchain costs across many requests by separating **authorization** (off-chain voucher signatures) from **settlement** (onchain batch transactions).
 
-
 ## Core Properties (MUST)
 
 The `session` scheme MUST enforce the following properties across ALL network implementations:
 
 ### 1. Cumulative Monotonic Vouchers
 
-Each voucher carries a `cumulativeAmount` that MUST be strictly greater than the previous voucher's amount. The increment between consecutive vouchers MUST equal the per-request price. Vouchers are not individually redeemable, only the highest voucher matters for settlement.
+Each voucher carries a `cumulativeAmount` that MUST be strictly greater than the previous voucher's amount. The increment between consecutive vouchers MUST equal the per-request price. Only the highest voucher matters for settlement.
+
+- Rationale: Eliminates double-spend risk without requiring nonce tracking per voucher.
 
 ### 2. Channel Deposit Model
 
 Clients deposit funds into an onchain escrow (channel) before consuming resources. The deposit is refundable: upon channel close, the unsettled remainder returns to the client. Deposits can be topped up without closing the channel.
 
+- Rationale: Guarantees the server can always settle up to the deposit amount without further client cooperation.
+
 ### 3. Batched Onchain Settlement
 
 Settlement is deferred at the server's discretion. The server accumulates vouchers off-chain and settles when economically optimal (e.g. threshold-based, periodic, or on close).
+
+- Rationale: Amortizes gas costs across many requests.
+
+### 4. Facilitator Verification
+
+The server is the source of truth for per-channel state and provides it to the facilitator via `paymentRequirements.extra`. The facilitator cross-checks the client's signed voucher against this server-provided state: signature validity, channel existence, payee/token/settler match, correct cumulative amount increment, and deposit sufficiency. Concrete verification checklists are defined in network-specific specs.
+
+### 5. Client State Verification
+
+The client MUST verify server-provided cumulative amounts before signing each voucher. In-session: confirm the returned `cumulativeAmount` incremented by exactly the request price. On recovery (after state loss): verify that the server-provided `lastSignature` recovers to the client's own key for the claimed `cumulativeAmount`. Concrete field-level rules are defined in network-specific specs.
 
 ---
 
@@ -37,7 +50,7 @@ Settlement is deferred at the server's discretion. The server accumulates vouche
 
 ### First Request (Channel Open)
 
-The server returns a 402 with no `channelId`, signaling a new channel must be opened. The client signs a token authorization (for the deposit) and a first voucher, then retries with a `channelOpen` payload.
+The server returns a 402 with no `channelId`, signaling a new channel must be opened.
 
 ```
 Client                      Server                   Facilitator           Blockchain
@@ -58,11 +71,7 @@ Client                      Server                   Facilitator           Block
 
 ### Subsequent Requests (Voucher)
 
-The server returns a 402 with `PaymentRequirements` containing the `amount` for this request and `extra.authorizedSettler`. The 402 is **generic by default** -- it does NOT contain per-client channel state (`channelId`, `cumulativeAmount`, `deposit`). The client is responsible for knowing its own channel state, either from the last `PAYMENT-RESPONSE` (within a workflow) or from a contract read (after state loss). See [Channel Resume](#channel-resume-after-state-loss) for the state-loss case.
-
-The client signs a new cumulative voucher incrementing by `amount`. After receiving the client's `PAYMENT-SIGNATURE`, the server reads the `channelId` from the payload, looks up its own per-channel state, and includes it in `paymentRequirements.extra` when forwarding to the facilitator.
-
-> **Optional convenience**: If the server can identify the client (e.g. via the [sign-in-with-x](../../extensions/sign-in-with-x.md) extension), it MAY include channel state (`channelId`, `cumulativeAmount`, `deposit`) in the 402 `extra` as a convenience. This is NOT required for the core flow.
+The 402 is generic by default -- it does NOT contain per-client channel state. The client tracks its own state from the last `PAYMENT-RESPONSE` or via a contract read after state loss.
 
 ```
 Client                      Server                   Facilitator
@@ -85,7 +94,7 @@ Client                      Server                   Facilitator
 
 ### Top-Up (Deposit Exhausted)
 
-When the client's own channel state shows `cumulativeAmount + amount > deposit`, it knows a top-up is required. It signs a token authorization for the additional deposit and a new voucher, then retries with a `topUp` payload. The server includes its channel state in `paymentRequirements.extra` when forwarding to the facilitator.
+When `cumulativeAmount + amount > deposit`, the client signs a token authorization for the additional deposit and a new voucher.
 
 ```
 Client                      Server                   Facilitator           Blockchain
@@ -108,7 +117,7 @@ Client                      Server                   Facilitator           Block
 
 ### Close (Client-Initiated via Payload Flag)
 
-The client includes `requestClose: true` in a voucher payload. The server processes the request normally, then instructs the facilitator to close the channel:
+The client includes `requestClose: true` in a voucher payload.
 
 ```
 Client                      Server                   Facilitator           Blockchain
@@ -123,18 +132,7 @@ Client                      Server                   Facilitator           Block
 
 ### Channel Resume (After State Loss)
 
-When a client returns after losing state (e.g. browser restart, days later), it has no `PAYMENT-RESPONSE` to reference. It must rediscover its open channel before sending a voucher.
-
-The channel resume flow:
-
-1. Client receives a generic 402 (no channel state)
-2. Client discovers its channel via a network-specific mechanism (e.g. contract read on EVM -- see [`scheme_session_evm.md`](./scheme_session_evm.md))
-3. Client sends a voucher anchored to the onchain `settled` amount (`payload.cumulativeAmount = settled + amount`)
-4. Server reads the `channelId` from the payload, includes its own channel state in `paymentRequirements.extra`
-5. Facilitator checks `payload.cumulativeAmount == paymentRequirements.extra.cumulativeAmount + paymentRequirements.amount`
-6. **If match**: the server had no unsettled vouchers (or recently settled). Facilitator accepts.
-7. **If mismatch**: the server holds unsettled vouchers above the onchain `settled` amount. The implied base (`payload.cumulativeAmount - amount`) does not match the server's truth. Facilitator rejects with `session_stale_cumulative_amount`.
-8. On rejection: server returns a **corrective 402** that includes its per-channel state (`channelId`, `cumulativeAmount`, `deposit`) and `lastSignature` (the client's own voucher signature for that `cumulativeAmount`) so the client can verify the server's claim and retry with the correct base. At most one extra roundtrip.
+When a client returns after losing state, it rediscovers its channel via a network-specific mechanism (e.g. contract read on EVM) and anchors the voucher to the onchain `settled` amount. If the server has unsettled vouchers above `settled`, the facilitator rejects with `session_stale_cumulative_amount`, and the server returns a **corrective 402** with its per-channel state and `lastSignature`. The client verifies the signature and retries. At most one extra roundtrip.
 
 ```
 Client                      Server                   Facilitator           Blockchain
@@ -167,113 +165,6 @@ Client                      Server                   Facilitator           Block
   |<-- 200 + PAYMENT-RESPONSE|                              |                     |
 ```
 
-> **Alternative: SIWX-assisted resume.** If the server supports the [sign-in-with-x](../../extensions/sign-in-with-x.md) extension and the client provides a `SIGN-IN-WITH-X` header, the server identifies the client and includes channel state in the 402 directly. This skips the contract read and avoids the potential stale-settled roundtrip. See the EVM spec for details.
-
-### Channel Closure Recommendation
-
-If no identification extensions are in use and the client does not persist state, it SHOULD close the channel at the end of its workflow (`requestClose: true`). This avoids the resume complexity (contract reads, potential stale-settled roundtrips).
-
----
-
-## State Management
-
-The server is the sole owner of session state. The facilitator is stateless.
-
-### Server State
-
-The server MUST maintain the following per open channel:
-
-| State Field            | Type      | Description                                                |
-| :--------------------- | :-------- | :--------------------------------------------------------- |
-| `channelId`            | `bytes32` | Channel identifier                                         |
-| `lastCumulativeAmount` | `uint128` | Highest cumulative amount from a verified voucher          |
-| `lastSignature`        | `bytes`   | Signature corresponding to `lastCumulativeAmount`          |
-| `deposit`              | `uint128` | Current channel deposit (updated on top-up)                |
-| `settled`              | `uint128` | Amount already settled onchain                             |
-
-### Server → Facilitator: `paymentRequirements.extra`
-
-When forwarding a payment to the facilitator for verification, the server includes its per-channel state in `paymentRequirements.extra`. This enables the facilitator to cross-check the client's claimed base against the server's truth.
-
-**For `channelOpen` payloads** (first request), `paymentRequirements.extra` contains only the `authorizedSettler`:
-
-```json
-{
-  "authorizedSettler": "0xFacilitator..."
-}
-```
-
-**For `voucher` and `topUp` payloads** (subsequent requests), the server includes its per-channel state:
-
-```json
-{
-  "authorizedSettler": "0xFacilitator...",
-  "channelId": "0xabc...",
-  "cumulativeAmount": "500000",
-  "deposit": "1000000",
-  "lastSignature": "0x...voucher signature for cumulativeAmount"
-}
-```
-
-> `lastSignature` is the client's voucher signature corresponding to `cumulativeAmount`. It is included in `paymentRequirements.extra` for the facilitator and in 402 responses that carry channel state (corrective 402s, SIWX-enriched 402s). The client uses it to verify the server's claimed state (see [Client Verification Rules](#client-verification-rules-must)).
-
-The server populates this data as follows:
-- When client identity is known at 402 time (via SIWX): the same data that appears in the 402 `accepts[].extra` is forwarded in `paymentRequirements.extra`.
-- When client identity is NOT known (generic 402): the server reads the `channelId` from the client's `PAYMENT-SIGNATURE` payload, looks up its own state, and appends channel info to `paymentRequirements.extra` before forwarding.
-
-### 402 Response to Client
-
-The 402 response to the client includes channel state in `extra` **ONLY** when the server can identify the client (e.g. via SIWX) or in a corrective 402 (after `session_stale_cumulative_amount`). Otherwise, the 402 is generic -- containing only `authorizedSettler` (and optionally `assetTransferMethod`).
-
-When channel state is included, the server MUST also include `lastSignature` — the client's voucher signature corresponding to `cumulativeAmount`. This enables the client to cryptographically verify the server's claimed state before signing the next voucher (see [Client Verification Rules](#client-verification-rules-must)).
-
----
-
-## Verification Rules (MUST)
-
-A facilitator verifying a `session`-scheme payment MUST enforce:
-
-1. **Signature validity**: The voucher signature MUST recover to an authorized signer for the channel.
-2. **Channel existence**: For `voucher` and `topUp` payloads, the channel MUST exist and not be finalized. For `channelOpen`, the channel MUST NOT already exist.
-3. **Payee match**: The channel payee MUST equal `paymentRequirements.payTo`.
-4. **Token match**: The channel token MUST equal `paymentRequirements.asset`.
-5. **Settler match**: The channel's authorized settler MUST equal the facilitator's own signer address.
-6. **Amount increment (base cross-check)**: `payload.cumulativeAmount` MUST equal `paymentRequirements.extra.cumulativeAmount + paymentRequirements.amount`. This single check validates both the correct per-request increment and that the client's implied base (`payload.cumulativeAmount - amount`) matches the server's truth. If the implied base does not match (e.g. anchored to onchain `settled` while the server has unsettled vouchers), the facilitator rejects with `session_stale_cumulative_amount`.
-7. **Deposit sufficiency**: `payload.cumulativeAmount` MUST be ≤ `paymentRequirements.extra.deposit` (the server's known deposit). For `topUp` payloads, `payload.cumulativeAmount` MUST be ≤ `paymentRequirements.extra.deposit + topUp.additionalDeposit`.
-8. **Channel not expired**: If a close has been requested and the grace period has elapsed, the channel MUST be rejected.
-
-These checks are security-critical. The server is the source of truth via `paymentRequirements.extra`. The facilitator validates; the server provides data. Implementations MAY introduce stricter limits but MUST NOT relax the above constraints.
-
----
-
-## Client Verification Rules (MUST)
-
-The facilitator's verification rules protect the server and facilitator. The following rules protect the **client** from a misbehaving server that inflates channel state.
-
-### In-Session Verification
-
-After each successful request, the client receives a `PAYMENT-RESPONSE` with `extra.cumulativeAmount` and `extra.deposit`. Before using these values as the base for the next voucher, the client MUST verify:
-
-1. **Cumulative amount increment**: `PAYMENT-RESPONSE.extra.cumulativeAmount` MUST equal `previousCumulativeAmount + requestAmount`, where `previousCumulativeAmount` is the cumulative amount from the client's last signed voucher and `requestAmount` is the price from the 402 `amount` field. If the server inflates `cumulativeAmount`, the client would otherwise sign vouchers that authorize more than the actual cost of service.
-
-2. **Deposit consistency**: For non-topup responses, `PAYMENT-RESPONSE.extra.deposit` MUST equal the client's last known deposit. For topup responses, it MUST equal `previousDeposit + additionalDeposit`.
-
-3. **Channel ID consistency**: `PAYMENT-RESPONSE.extra.channelId` MUST match the channel the client is operating on.
-
-If any check fails, the client MUST NOT sign further vouchers and SHOULD initiate channel closure (`requestClose: true` on the last valid voucher, or unilateral `requestClose` onchain).
-
-### Recovery Verification
-
-When the client has lost state and receives a corrective 402 (or a SIWX-enriched 402) containing channel state, it cannot independently verify `cumulativeAmount` from its own memory. The server MUST include `lastSignature` in the 402 `extra` — the client's own voucher signature corresponding to the claimed `cumulativeAmount`.
-
-The client MUST verify:
-
-1. **Voucher signature**: Compute the voucher digest from `extra.channelId` and `extra.cumulativeAmount`, recover the signer from `extra.lastSignature`, and confirm it matches the client's own address (or its `authorizedSigner`). This proves the client actually signed a voucher for the claimed cumulative amount.
-
-2. **Onchain consistency**: `extra.cumulativeAmount` MUST be ≥ the onchain `settled` amount (from the client's earlier contract read, if applicable). `extra.deposit` MUST match the onchain deposit.
-
-If the signature does not verify, the client MUST NOT sign a voucher based on the server's claimed state. The client SHOULD fall back to unilateral channel closure.
-
 ---
 
 ## Settlement Strategy
@@ -290,13 +181,11 @@ The resource server controls when and how often onchain settlement occurs:
 
 ## Skip-402 Optimization (Optional)
 
-Within a workflow, the client uses the last `PAYMENT-RESPONSE` for channel state and the 402 for price. If the price is constant AND the client has channel state from a prior `PAYMENT-RESPONSE`, the client MAY skip the 402 entirely:
+Within a workflow, if the price is constant AND the client has channel state from a prior `PAYMENT-RESPONSE`, the client MAY skip the 402 entirely:
 
 - The client reuses the previous `accepted` requirements and computes `cumulativeAmount` from `PAYMENT-RESPONSE.extra.cumulativeAmount + amount`.
 - The server MUST accept proactive vouchers (no 402 required) if the voucher is valid.
 - If the proactive voucher has the wrong amount (e.g., the price changed), the server returns a 402 with the correct price and the client retries.
-
-This is a narrow optimization for fixed-price workflows. The primary flow always includes a 402 roundtrip to learn the current price.
 
 ---
 
@@ -317,7 +206,7 @@ In addition to the standard x402 error codes, the `session` scheme defines:
 | `session_settler_mismatch`          | Channel `authorizedSettler` does not match the facilitator's signer |
 | `session_channel_expired`           | Channel close grace period has elapsed                             |
 | `session_deposit_insufficient`      | Channel deposit is too low to cover another request                |
-| `session_stale_cumulative_amount`  | Voucher's base cumulative amount does not match the server's last known value. The client should retry with the corrective 402 channel state. |
+| `session_stale_cumulative_amount`  | Voucher's base cumulative amount does not match the server's last known value |
 
 ---
 
