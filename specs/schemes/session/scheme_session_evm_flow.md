@@ -59,7 +59,9 @@ Host: api.example.com
       "payTo": "0xServerPayeeAddress",
       "maxTimeoutSeconds": 3600,
       "extra": {
-        "authorizedSettler": "0xFacilitatorSignerAddress"
+        "authorizedSettler": "0xFacilitatorSignerAddress",
+        "name": "USDC",
+        "version": "2"
       }
     }
   ]
@@ -90,7 +92,9 @@ The client decides to deposit $1.00 (`1000000`) to cover ~10 requests. It signs 
     "payTo": "0xServerPayeeAddress",
     "maxTimeoutSeconds": 3600,
     "extra": {
-      "authorizedSettler": "0xFacilitatorSignerAddress"
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2"
     }
   },
   "payload": {
@@ -138,7 +142,9 @@ The server forwards the payload to the facilitator for validation. The facilitat
       "payTo": "0xServerPayeeAddress",
       "maxTimeoutSeconds": 3600,
       "extra": {
-        "authorizedSettler": "0xFacilitatorSignerAddress"
+        "authorizedSettler": "0xFacilitatorSignerAddress",
+        "name": "USDC",
+        "version": "2"
       }
     },
     "payload": {
@@ -173,7 +179,9 @@ The server forwards the payload to the facilitator for validation. The facilitat
     "payTo": "0xServerPayeeAddress",
     "maxTimeoutSeconds": 3600,
     "extra": {
-      "authorizedSettler": "0xFacilitatorSignerAddress"
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2"
     }
   }
 }
@@ -206,7 +214,9 @@ After verification succeeds, the server calls `/settle`. The facilitator sees `p
     "payTo": "0xServerPayeeAddress",
     "maxTimeoutSeconds": 3600,
     "extra": {
-      "authorizedSettler": "0xFacilitatorSignerAddress"
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2"
     }
   }
 }
@@ -271,7 +281,9 @@ The server reads the `channelId` from the client's payload, looks up its own per
       "payTo": "0xServerPayeeAddress",
       "maxTimeoutSeconds": 3600,
       "extra": {
-        "authorizedSettler": "0xFacilitatorSignerAddress"
+        "authorizedSettler": "0xFacilitatorSignerAddress",
+        "name": "USDC",
+        "version": "2"
       }
     }
   ]
@@ -297,7 +309,9 @@ The client signs a voucher using its own channel state:
     "payTo": "0xServerPayeeAddress",
     "maxTimeoutSeconds": 3600,
     "extra": {
-      "authorizedSettler": "0xFacilitatorSignerAddress"
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2"
     }
   },
   "payload": {
@@ -328,7 +342,9 @@ The server reads `channelId` from the payload, looks up its own state (`lastCumu
       "payTo": "0xServerPayeeAddress",
       "maxTimeoutSeconds": 3600,
       "extra": {
-        "authorizedSettler": "0xFacilitatorSignerAddress"
+        "authorizedSettler": "0xFacilitatorSignerAddress",
+        "name": "USDC",
+        "version": "2"
       }
     },
     "payload": {
@@ -347,9 +363,12 @@ The server reads `channelId` from the payload, looks up its own state (`lastCumu
     "maxTimeoutSeconds": 3600,
     "extra": {
       "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2",
       "channelId": "0xabc123...channelId",
       "cumulativeAmount": "100000",
-      "deposit": "1000000"
+      "deposit": "1000000",
+      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 100000"
     }
   }
 }
@@ -411,7 +430,9 @@ On the 11th request, the server returns a generic 402 (price only). The client k
       "payTo": "0xServerPayeeAddress",
       "maxTimeoutSeconds": 3600,
       "extra": {
-        "authorizedSettler": "0xFacilitatorSignerAddress"
+        "authorizedSettler": "0xFacilitatorSignerAddress",
+        "name": "USDC",
+        "version": "2"
       }
     }
   ]
@@ -436,7 +457,9 @@ On the 11th request, the server returns a generic 402 (price only). The client k
     "payTo": "0xServerPayeeAddress",
     "maxTimeoutSeconds": 3600,
     "extra": {
-      "authorizedSettler": "0xFacilitatorSignerAddress"
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2"
     }
   },
   "payload": {
@@ -479,9 +502,12 @@ The server reads the `channelId` from the payload, looks up its own state, and i
     "maxTimeoutSeconds": 3600,
     "extra": {
       "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2",
       "channelId": "0xabc123...channelId",
       "cumulativeAmount": "1000000",
-      "deposit": "1000000"
+      "deposit": "1000000",
+      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 1000000"
     }
   }
 }
@@ -515,9 +541,12 @@ After verification succeeds, the server calls `/settle`. The facilitator sees `p
     "maxTimeoutSeconds": 3600,
     "extra": {
       "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2",
       "channelId": "0xabc123...channelId",
       "cumulativeAmount": "1000000",
-      "deposit": "1000000"
+      "deposit": "1000000",
+      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 1000000"
     }
   }
 }
@@ -578,7 +607,9 @@ The client makes one more request and signals it is done by setting `requestClos
       "payTo": "0xServerPayeeAddress",
       "maxTimeoutSeconds": 3600,
       "extra": {
-        "authorizedSettler": "0xFacilitatorSignerAddress"
+        "authorizedSettler": "0xFacilitatorSignerAddress",
+        "name": "USDC",
+        "version": "2"
       }
     }
   ]
@@ -603,7 +634,9 @@ The client makes one more request and signals it is done by setting `requestClos
     "payTo": "0xServerPayeeAddress",
     "maxTimeoutSeconds": 3600,
     "extra": {
-      "authorizedSettler": "0xFacilitatorSignerAddress"
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2"
     }
   },
   "payload": {
@@ -635,7 +668,9 @@ The server includes its channel state in `paymentRequirements.extra`:
       "payTo": "0xServerPayeeAddress",
       "maxTimeoutSeconds": 3600,
       "extra": {
-        "authorizedSettler": "0xFacilitatorSignerAddress"
+        "authorizedSettler": "0xFacilitatorSignerAddress",
+        "name": "USDC",
+        "version": "2"
       }
     },
     "payload": {
@@ -655,9 +690,12 @@ The server includes its channel state in `paymentRequirements.extra`:
     "maxTimeoutSeconds": 3600,
     "extra": {
       "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2",
       "channelId": "0xabc123...channelId",
       "cumulativeAmount": "1100000",
-      "deposit": "1500000"
+      "deposit": "1500000",
+      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 1100000"
     }
   }
 }
@@ -691,9 +729,12 @@ The facilitator sees `requestClose: true` in the voucher payload and calls `clos
     "maxTimeoutSeconds": 3600,
     "extra": {
       "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2",
       "channelId": "0xabc123...channelId",
       "cumulativeAmount": "1100000",
-      "deposit": "1500000"
+      "deposit": "1500000",
+      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 1100000"
     }
   }
 }
@@ -792,7 +833,9 @@ Host: api.example.com
       "payTo": "0xServerPayeeAddress",
       "maxTimeoutSeconds": 3600,
       "extra": {
-        "authorizedSettler": "0xFacilitatorSignerAddress"
+        "authorizedSettler": "0xFacilitatorSignerAddress",
+        "name": "USDC",
+        "version": "2"
       }
     }
   ]
@@ -865,7 +908,9 @@ The client anchors to the onchain `settled` amount (500000) since it has no othe
     "payTo": "0xServerPayeeAddress",
     "maxTimeoutSeconds": 3600,
     "extra": {
-      "authorizedSettler": "0xFacilitatorSignerAddress"
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2"
     }
   },
   "payload": {
@@ -881,7 +926,7 @@ The client anchors to the onchain `settled` amount (500000) since it has no othe
 
 ### Server → Facilitator: `POST /verify` — Stale Base Detected
 
-The server reads `channelId` from the payload, looks up its own state (`lastCumulativeAmount = 800000`), and includes it in `paymentRequirements.extra`:
+The server reads `channelId` from the payload, looks up its own state (`lastCumulativeAmount = 800000`, `lastSignature`), and includes it in `paymentRequirements.extra`:
 
 **Request:**
 
@@ -898,9 +943,12 @@ The server reads `channelId` from the payload, looks up its own state (`lastCumu
     "maxTimeoutSeconds": 3600,
     "extra": {
       "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2",
       "channelId": "0xdef456...",
       "cumulativeAmount": "800000",
-      "deposit": "1000000"
+      "deposit": "1000000",
+      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 800000"
     }
   }
 }
@@ -921,7 +969,7 @@ The server reads `channelId` from the payload, looks up its own state (`lastCumu
 
 ### Server → Client: Corrective 402
 
-The server returns a 402 **with** its per-channel state so the client can retry:
+The server returns a 402 **with** its per-channel state and `lastSignature` so the client can verify and retry:
 
 **`PAYMENT-REQUIRED` header (base64-decoded):**
 
@@ -939,16 +987,26 @@ The server returns a 402 **with** its per-channel state so the client can retry:
       "maxTimeoutSeconds": 3600,
       "extra": {
         "authorizedSettler": "0xFacilitatorSignerAddress",
+        "name": "USDC",
+        "version": "2",
         "channelId": "0xdef456...",
         "cumulativeAmount": "800000",
-        "deposit": "1000000"
+        "deposit": "1000000",
+        "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 800000"
       }
     }
   ]
 }
 ```
 
-### Client Retries with Correct Base
+### Client Verifies and Retries with Correct Base
+
+The client verifies `lastSignature` before trusting the server's claimed state:
+
+1. Compute EIP-712 digest: `Voucher(channelId = 0xdef456..., cumulativeAmount = 800000)` using the TempoStreamChannel domain separator
+2. Recover signer from `lastSignature`
+3. Confirm recovered signer matches the client's own address → the client provably signed a voucher for 800000
+4. Confirm `800000 >= 500000` (onchain `settled` from the earlier contract read) → consistent with onchain state
 
 **`PAYMENT-SIGNATURE` header (base64-decoded):**
 
@@ -964,9 +1022,12 @@ The server returns a 402 **with** its per-channel state so the client can retry:
     "maxTimeoutSeconds": 3600,
     "extra": {
       "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2",
       "channelId": "0xdef456...",
       "cumulativeAmount": "800000",
-      "deposit": "1000000"
+      "deposit": "1000000",
+      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 800000"
     }
   },
   "payload": {
@@ -995,9 +1056,12 @@ The server returns a 402 **with** its per-channel state so the client can retry:
     "maxTimeoutSeconds": 3600,
     "extra": {
       "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2",
       "channelId": "0xdef456...",
       "cumulativeAmount": "800000",
-      "deposit": "1000000"
+      "deposit": "1000000",
+      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 800000"
     }
   }
 }
@@ -1049,7 +1113,7 @@ SIGN-IN-WITH-X: eyJ...base64-encoded SIWX token...
 
 ### Server Response — 402 WITH Channel State
 
-The server recovers the client address from the SIWX token, looks up open channels, and includes channel state in the 402:
+The server recovers the client address from the SIWX token, looks up open channels, and includes channel state and `lastSignature` in the 402:
 
 ```json
 {
@@ -1065,18 +1129,21 @@ The server recovers the client address from the SIWX token, looks up open channe
       "maxTimeoutSeconds": 3600,
       "extra": {
         "authorizedSettler": "0xFacilitatorSignerAddress",
+        "name": "USDC",
+        "version": "2",
         "channelId": "0xdef456...",
         "cumulativeAmount": "800000",
-        "deposit": "1000000"
+        "deposit": "1000000",
+        "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 800000"
       }
     }
   ]
 }
 ```
 
-> Channel state included in 402 — no contract read needed, no stale-settled risk.
+> Channel state included in 402 — no contract read needed, no stale-settled risk. The client verifies `lastSignature` recovers to its own key for `Voucher(0xdef456..., 800000)` before trusting the server's claimed state.
 
-### Client Signs Correct Voucher Directly
+### Client Verifies and Signs Correct Voucher
 
 **`PAYMENT-SIGNATURE` header (base64-decoded):**
 
@@ -1092,9 +1159,12 @@ The server recovers the client address from the SIWX token, looks up open channe
     "maxTimeoutSeconds": 3600,
     "extra": {
       "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2",
       "channelId": "0xdef456...",
       "cumulativeAmount": "800000",
-      "deposit": "1000000"
+      "deposit": "1000000",
+      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 800000"
     }
   },
   "payload": {

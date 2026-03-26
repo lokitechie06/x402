@@ -134,7 +134,7 @@ The channel resume flow:
 5. Facilitator checks `payload.cumulativeAmount == paymentRequirements.extra.cumulativeAmount + paymentRequirements.amount`
 6. **If match**: the server had no unsettled vouchers (or recently settled). Facilitator accepts.
 7. **If mismatch**: the server holds unsettled vouchers above the onchain `settled` amount. The implied base (`payload.cumulativeAmount - amount`) does not match the server's truth. Facilitator rejects with `session_stale_cumulative_amount`.
-8. On rejection: server returns a **corrective 402** that includes its per-channel state (`channelId`, `cumulativeAmount`, `deposit`) so the client can retry with the correct base. At most one extra roundtrip.
+8. On rejection: server returns a **corrective 402** that includes its per-channel state (`channelId`, `cumulativeAmount`, `deposit`) and `lastSignature` (the client's own voucher signature for that `cumulativeAmount`) so the client can verify the server's claim and retry with the correct base. At most one extra roundtrip.
 
 ```
 Client                      Server                   Facilitator           Blockchain
@@ -158,7 +158,8 @@ Client                      Server                   Facilitator           Block
   |<-- 200 + PAYMENT-RESPONSE|                              |                     |
   |                          |                              |                     |
   |        alt mismatch -----|<-- isValid: false, session_stale_cumulative_amount |
-  |<-- 402 WITH channelId + cumulativeAmount + deposit      |                     |
+  |<-- 402 WITH channelId + cumulativeAmount + deposit + lastSignature           |
+  | [verifies lastSignature recovers to own key for cumulativeAmount]           |
   | [signs voucher for cumulativeAmount + amount]           |                     |
   |-- GET /resource + PAYMENT-SIGNATURE ----------------->|                      |
   |                          |-- POST /verify ----------->|                      |
@@ -209,9 +210,12 @@ When forwarding a payment to the facilitator for verification, the server includ
   "authorizedSettler": "0xFacilitator...",
   "channelId": "0xabc...",
   "cumulativeAmount": "500000",
-  "deposit": "1000000"
+  "deposit": "1000000",
+  "lastSignature": "0x...voucher signature for cumulativeAmount"
 }
 ```
+
+> `lastSignature` is the client's voucher signature corresponding to `cumulativeAmount`. It is included in `paymentRequirements.extra` for the facilitator and in 402 responses that carry channel state (corrective 402s, SIWX-enriched 402s). The client uses it to verify the server's claimed state (see [Client Verification Rules](#client-verification-rules-must)).
 
 The server populates this data as follows:
 - When client identity is known at 402 time (via SIWX): the same data that appears in the 402 `accepts[].extra` is forwarded in `paymentRequirements.extra`.
@@ -219,7 +223,9 @@ The server populates this data as follows:
 
 ### 402 Response to Client
 
-The 402 response to the client includes channel state in `extra` **ONLY** when the server can identify the client (e.g. via SIWX). Otherwise, the 402 is generic -- containing only `authorizedSettler` (and optionally `assetTransferMethod`).
+The 402 response to the client includes channel state in `extra` **ONLY** when the server can identify the client (e.g. via SIWX) or in a corrective 402 (after `session_stale_cumulative_amount`). Otherwise, the 402 is generic -- containing only `authorizedSettler` (and optionally `assetTransferMethod`).
+
+When channel state is included, the server MUST also include `lastSignature` — the client's voucher signature corresponding to `cumulativeAmount`. This enables the client to cryptographically verify the server's claimed state before signing the next voucher (see [Client Verification Rules](#client-verification-rules-must)).
 
 ---
 
@@ -237,6 +243,36 @@ A facilitator verifying a `session`-scheme payment MUST enforce:
 8. **Channel not expired**: If a close has been requested and the grace period has elapsed, the channel MUST be rejected.
 
 These checks are security-critical. The server is the source of truth via `paymentRequirements.extra`. The facilitator validates; the server provides data. Implementations MAY introduce stricter limits but MUST NOT relax the above constraints.
+
+---
+
+## Client Verification Rules (MUST)
+
+The facilitator's verification rules protect the server and facilitator. The following rules protect the **client** from a misbehaving server that inflates channel state.
+
+### In-Session Verification
+
+After each successful request, the client receives a `PAYMENT-RESPONSE` with `extra.cumulativeAmount` and `extra.deposit`. Before using these values as the base for the next voucher, the client MUST verify:
+
+1. **Cumulative amount increment**: `PAYMENT-RESPONSE.extra.cumulativeAmount` MUST equal `previousCumulativeAmount + requestAmount`, where `previousCumulativeAmount` is the cumulative amount from the client's last signed voucher and `requestAmount` is the price from the 402 `amount` field. If the server inflates `cumulativeAmount`, the client would otherwise sign vouchers that authorize more than the actual cost of service.
+
+2. **Deposit consistency**: For non-topup responses, `PAYMENT-RESPONSE.extra.deposit` MUST equal the client's last known deposit. For topup responses, it MUST equal `previousDeposit + additionalDeposit`.
+
+3. **Channel ID consistency**: `PAYMENT-RESPONSE.extra.channelId` MUST match the channel the client is operating on.
+
+If any check fails, the client MUST NOT sign further vouchers and SHOULD initiate channel closure (`requestClose: true` on the last valid voucher, or unilateral `requestClose` onchain).
+
+### Recovery Verification
+
+When the client has lost state and receives a corrective 402 (or a SIWX-enriched 402) containing channel state, it cannot independently verify `cumulativeAmount` from its own memory. The server MUST include `lastSignature` in the 402 `extra` — the client's own voucher signature corresponding to the claimed `cumulativeAmount`.
+
+The client MUST verify:
+
+1. **Voucher signature**: Compute the voucher digest from `extra.channelId` and `extra.cumulativeAmount`, recover the signer from `extra.lastSignature`, and confirm it matches the client's own address (or its `authorizedSigner`). This proves the client actually signed a voucher for the claimed cumulative amount.
+
+2. **Onchain consistency**: `extra.cumulativeAmount` MUST be ≥ the onchain `settled` amount (from the client's earlier contract read, if applicable). `extra.deposit` MUST match the onchain deposit.
+
+If the signature does not verify, the client MUST NOT sign a voucher based on the server's claimed state. The client SHOULD fall back to unilateral channel closure.
 
 ---
 

@@ -79,13 +79,16 @@ channelId = keccak256(abi.encode(payer, payee, token, salt, authorizedSigner, au
 | :-------------------------- | :-------- | :------------------- | :-------------------------------------------------------------------------- |
 | `extra.authorizedSettler`   | `string`  | Always               | Facilitator's signer address, used as `authorizedSettler` when opening channels |
 | `extra.assetTransferMethod` | `string`  | Optional             | `"eip3009"` (default) or `"permit2"` (future). Omit to use default.         |
-| `extra.channelId`           | `string`  | Optional             | Included when server can identify client (e.g. via SIWX). Otherwise omitted. |
-| `extra.cumulativeAmount`    | `string`  | Optional             | Included when server can identify client. Otherwise omitted.                |
-| `extra.deposit`             | `string`  | Optional             | Included when server can identify client. Otherwise omitted.                |
+| `extra.name`                | `string`  | Always (eip3009)     | EIP-712 domain name of the token contract (e.g., `"USDC"`)                  |
+| `extra.version`             | `string`  | Always (eip3009)     | EIP-712 domain version of the token contract (e.g., `"2"`)                  |
+| `extra.channelId`           | `string`  | Optional             | Included when server can identify client (e.g. via SIWX) or in corrective 402. Otherwise omitted. |
+| `extra.cumulativeAmount`    | `string`  | Optional             | Included when server can identify client or in corrective 402. Otherwise omitted. |
+| `extra.deposit`             | `string`  | Optional             | Included when server can identify client or in corrective 402. Otherwise omitted. |
+| `extra.lastSignature`       | `string`  | Optional  | Included when server can identify client or in corrective 402. Otherwise omitted. |
 
 The `authorizedSettler` is the facilitator's onchain signer address. When opening a channel, the client MUST pass this address as the `authorizedSettler` parameter. This enables the facilitator to submit `settle` and `close` transactions on behalf of the server.
 
-> If `channelId`, `cumulativeAmount`, and `deposit` are omitted from the 402, the client MUST discover channel state via its own means: either from its last `PAYMENT-RESPONSE` (within a workflow) or via a contract read (see [Channel Discovery](#channel-discovery)).
+> If `channelId`, `cumulativeAmount`, `deposit`, and `lastSignature` are omitted from the 402, the client MUST discover channel state via its own means: either from its last `PAYMENT-RESPONSE` (within a workflow) or via a contract read (see [Channel Discovery](#channel-discovery)).
 
 ### In /verify Request (Server → Facilitator)
 
@@ -97,6 +100,7 @@ For `voucher` and `topUp` payloads, the server enriches `paymentRequirements.ext
 | `extra.channelId`           | `string`  | `voucher` / `topUp`   | Channel being used                                                          |
 | `extra.cumulativeAmount`    | `string`  | `voucher` / `topUp`   | Server's `lastCumulativeAmount` for this channel                            |
 | `extra.deposit`             | `string`  | `voucher` / `topUp`   | Server's known deposit for this channel                                     |
+| `extra.lastSignature`       | `string`  | `voucher` / `topUp`   | Client's voucher signature corresponding to `cumulativeAmount`              |
 
 The facilitator uses `paymentRequirements.extra.cumulativeAmount` as the source of truth for the base amount cross-check (see [Verification Rules](./scheme_session.md#verification-rules-must)).
 
@@ -136,7 +140,7 @@ After discovering an open channel, the client anchors its voucher to the onchain
 
 - Signs `payload.cumulativeAmount = settled + amount`
 
-The facilitator checks `payload.cumulativeAmount == paymentRequirements.extra.cumulativeAmount + amount`. If the server has unsettled vouchers (its `lastCumulativeAmount > settled`), the implied base (`settled`) does not match the server's truth, and the facilitator rejects with `session_stale_cumulative_amount`. The server then returns a **corrective 402** with its per-channel state, and the client retries with the correct base.
+The facilitator checks `payload.cumulativeAmount == paymentRequirements.extra.cumulativeAmount + amount`. If the server has unsettled vouchers (its `lastCumulativeAmount > settled`), the implied base (`settled`) does not match the server's truth, and the facilitator rejects with `session_stale_cumulative_amount`. The server then returns a **corrective 402** with its per-channel state and `lastSignature`, and the client verifies the signature before retrying with the correct base.
 
 ### SIWX-Assisted Resume (Optional)
 
@@ -144,9 +148,9 @@ If the server supports the [sign-in-with-x](../../extensions/sign-in-with-x.md) 
 
 1. The server recovers the client address from the SIWX token
 2. The server looks up open channels for that address
-3. The server includes channel state (`channelId`, `cumulativeAmount`, `deposit`) in the 402 `extra`
+3. The server includes channel state (`channelId`, `cumulativeAmount`, `deposit`, `lastSignature`) in the 402 `extra`
 
-This saves the contract read and avoids the potential stale-settled roundtrip.
+This saves the contract read and avoids the potential stale-settled roundtrip. The client MUST verify `lastSignature` before using the server-provided channel state (see [`scheme_session.md` — Client Verification Rules](./scheme_session.md#client-verification-rules-must)).
 
 ---
 
@@ -221,7 +225,9 @@ The `channelOpen` and `topUp` payloads include an `erc3009Authorization` object:
     "payTo": "0xServerPayeeAddress",
     "maxTimeoutSeconds": 3600,
     "extra": {
-      "authorizedSettler": "0xFacilitatorSignerAddress"
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2"
     }
   },
   "payload": {
@@ -265,7 +271,9 @@ The client's channel state is conveyed entirely through the `payload` fields (`c
     "payTo": "0xServerPayeeAddress",
     "maxTimeoutSeconds": 3600,
     "extra": {
-      "authorizedSettler": "0xFacilitatorSignerAddress"
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2"
     }
   },
   "payload": {
@@ -293,7 +301,9 @@ The client determined a top-up was needed from its own state because `cumulative
     "payTo": "0xServerPayeeAddress",
     "maxTimeoutSeconds": 3600,
     "extra": {
-      "authorizedSettler": "0xFacilitatorSignerAddress"
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2"
     }
   },
   "payload": {
@@ -370,7 +380,7 @@ Verifies a payment payload without onchain interaction. Accepts all payload type
 
 **Request (voucher — representative example):**
 
-The server enriches `paymentRequirements.extra` with its per-channel state (`channelId`, `cumulativeAmount`, `deposit`) for `voucher` and `topUp` payloads before forwarding to the facilitator:
+The server enriches `paymentRequirements.extra` with its per-channel state (`channelId`, `cumulativeAmount`, `deposit`, `lastSignature`) for `voucher` and `topUp` payloads before forwarding to the facilitator:
 
 ```json
 {
@@ -385,7 +395,9 @@ The server enriches `paymentRequirements.extra` with its per-channel state (`cha
       "payTo": "0xServerPayeeAddress",
       "maxTimeoutSeconds": 3600,
       "extra": {
-        "authorizedSettler": "0xFacilitatorSignerAddress"
+        "authorizedSettler": "0xFacilitatorSignerAddress",
+        "name": "USDC",
+        "version": "2"
       }
     },
     "payload": {
@@ -404,15 +416,18 @@ The server enriches `paymentRequirements.extra` with its per-channel state (`cha
     "maxTimeoutSeconds": 3600,
     "extra": {
       "authorizedSettler": "0xFacilitatorSignerAddress",
+      "name": "USDC",
+      "version": "2",
       "channelId": "0xabc123...",
       "cumulativeAmount": "4000",
-      "deposit": "100000"
+      "deposit": "100000",
+      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 4000"
     }
   }
 }
 ```
 
-> Note: `paymentRequirements.extra` includes `channelId`, `cumulativeAmount`, and `deposit` (the server's truth). The facilitator verifies `payload.cumulativeAmount == paymentRequirements.extra.cumulativeAmount + paymentRequirements.amount`.
+> Note: `paymentRequirements.extra` includes `channelId`, `cumulativeAmount`, `deposit`, and `lastSignature` (the server's truth). The facilitator verifies `payload.cumulativeAmount == paymentRequirements.extra.cumulativeAmount + paymentRequirements.amount`.
 
 **Verification Logic:**
 
