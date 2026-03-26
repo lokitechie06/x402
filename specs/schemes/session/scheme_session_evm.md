@@ -66,7 +66,9 @@ channelId = keccak256(abi.encode(payer, payee, token, salt, authorizedSigner, au
 
 | Constant             | Value      | Description                                              |
 | :------------------- | :--------- | :------------------------------------------------------- |
-| `CLOSE_GRACE_PERIOD` | 15 minutes | Time between a payer's close request and withdrawal eligibility |
+| `CLOSE_GRACE_PERIOD` | 60 minutes | Time between a payer's close request and withdrawal eligibility |
+
+Increased from 15 minutes to give the server sufficient time to settle via time-tracking alone, without monitoring onchain events (see [Server Settlement Timing](#channel-lifecycle-notes)). |
 
 ---
 
@@ -325,10 +327,12 @@ The server MUST maintain the following per open channel:
 | State Field            | Type      | Description                                                |
 | :--------------------- | :-------- | :--------------------------------------------------------- |
 | `channelId`            | `bytes32` | Channel identifier                                         |
+| `payer`                | `address` | Client address (used to match channels via sign-in-with-x) |
 | `lastCumulativeAmount` | `uint128` | Highest cumulative amount from a verified voucher          |
 | `lastSignature`        | `bytes`   | Signature corresponding to `lastCumulativeAmount`          |
 | `deposit`              | `uint128` | Current channel deposit (updated on top-up)                |
 | `settled`              | `uint128` | Amount already settled onchain                             |
+| `lastRequestTimestamp` | `uint64`  | Timestamp of the last paid request on this channel         |
 
 ### Enriching `paymentRequirements.extra` for the Facilitator
 
@@ -371,9 +375,14 @@ Verification logic is defined in [Verification Rules](#verification-rules-must).
 ```json
 {
   "isValid": true,
-  "payer": "0xPayerAddress"
+  "payer": "0xPayerAddress",
+  "extra": {
+    "closeRequestedAt": 0
+  }
 }
 ```
+
+`extra.closeRequestedAt` is read from `channel.closeRequestedAt` (already available from the `getChannel()` call in verification rule #2). A non-zero value indicates the client has initiated a unilateral close and the server SHOULD settle immediately upon receiving this signal.
 
 ### POST /settle
 
@@ -441,6 +450,8 @@ Performs onchain operations. The facilitator infers the action from the payload:
 - **`voucher`**: Submit `settle(channelId, cumulativeAmount, signature)` using the highest voucher. The contract transfers the delta between the onchain `settled` amount and `cumulativeAmount` to the payee.
 - **`voucher` + `requestClose: true`**: Submit `close(channelId, cumulativeAmount, signature)` using the highest voucher. The contract settles the final amount and refunds the remainder to the payer.
 
+**Close Request Detection**: During `/settle`, if the facilitator reads `channel.closeRequestedAt != 0`, it MUST proceed with onchain settlement to protect the server's funds before the grace period expires.
+
 **Response:**
 
 ```json
@@ -452,12 +463,13 @@ Performs onchain operations. The facilitator infers the action from the payload:
   "extra": {
     "channelId": "0xabc123...",
     "cumulativeAmount": "5000",
-    "deposit": "100000"
+    "deposit": "100000",
+    "closeRequestedAt": 0
   }
 }
 ```
 
-The `extra` field contains updated session state. The server uses this to populate the `PAYMENT-RESPONSE` header and to update its own per-channel state. For `channelOpen` payloads, `extra.channelId` contains the newly created channel ID.
+The `extra` field contains updated session state. `closeRequestedAt` is non-zero if the client has initiated a unilateral close. The server uses this to populate the `PAYMENT-RESPONSE` header and to update its own per-channel state. For `channelOpen` payloads, `extra.channelId` contains the newly created channel ID.
 
 ### GET /supported
 
@@ -486,6 +498,7 @@ A facilitator verifying a `session`-scheme payment on EVM MUST enforce:
 6. **Balance check** (`channelOpen` and `topUp` only): Verify the client has sufficient token balance (`≥ deposit` for opens, `≥ additionalDeposit` for top-ups). For `voucher` payloads this is not needed as funds are already in escrow.
 7. **Amount increment (base cross-check)**: `payload.cumulativeAmount` MUST equal `paymentRequirements.extra.cumulativeAmount + paymentRequirements.amount`. If the implied base does not match, reject with `session_stale_cumulative_amount`.
 8. **Deposit sufficiency**: `payload.cumulativeAmount` MUST be ≤ `paymentRequirements.extra.deposit`. For `topUp` payloads, `payload.cumulativeAmount` MUST be ≤ `paymentRequirements.extra.deposit + topUp.additionalDeposit`.
+9. **Close request detection**: If `channel.closeRequestedAt != 0` (already available from the `getChannel()` read in rule 2), the facilitator MUST include `closeRequestedAt` in the `/verify` and `/settle` responses. During `/settle`, if `closeRequestedAt != 0`, the facilitator MUST proceed with onchain settlement to protect the server's funds before the grace period expires.
 
 These checks are security-critical. The server provides truth via `paymentRequirements.extra`; the facilitator validates. Implementations MAY introduce stricter limits but MUST NOT relax the above constraints.
 
@@ -558,7 +571,9 @@ If the signature does not verify, the client MUST NOT sign based on the server's
 
 **Cooperative Close**: The client includes `requestClose: true` in a voucher payload. The server processes the request normally, then calls `/settle`. The facilitator sees `requestClose: true` in the payload and calls `TempoStreamChannel.close()` as the `authorizedSettler`. The contract settles the final amount to the payee and refunds the remainder to the payer. If no identification extensions are in use and the client does not persist state, it SHOULD close the channel at the end of its workflow to avoid resume complexity.
 
-**Unilateral Close**: The client calls `TempoStreamChannel.requestClose()` directly onchain, starting the 15-minute grace period (`CLOSE_GRACE_PERIOD`). The server can still settle outstanding vouchers via the facilitator during this period. After the grace period, the client calls `withdraw()` to reclaim all unsettled funds.
+**Unilateral Close (Escape Hatch)**: If the server becomes unresponsive and the client cannot initiate a cooperative close, the client calls `TempoStreamChannel.requestClose(channelId)` directly onchain, paying gas themselves. This starts the `CLOSE_GRACE_PERIOD` (1 hour). The server can still settle outstanding vouchers via the facilitator during this period. After the grace period, the client calls `withdraw()` to reclaim all unsettled funds. This mechanism is intentionally a direct blockchain transaction, not gasless — the client does not have the facilitator's address in the unilateral path, and adding EIP-712 signature flows for an escape hatch would introduce unnecessary friction.
+
+**Server Settlement Timing**: The server SHOULD settle (or close) outstanding vouchers for a channel within `CLOSE_GRACE_PERIOD` of the last client request on that channel. This ensures the server captures earned funds even if the client initiates a unilateral close after the session goes idle. The facilitator provides an additional safety net: since it reads `channel.closeRequestedAt` from onchain state during `/verify` and `/settle` (see [Verification Rules](#verification-rules-must) rule 9), the server is alerted if a close request is already in progress and can settle immediately. Together, time-based settlement and facilitator detection protect the server without requiring onchain event monitoring. Servers managing many concurrent channels MAY additionally monitor onchain `CloseRequested` events (e.g. via RPC polling or an indexer) for more proactive awareness.
 
 ---
 

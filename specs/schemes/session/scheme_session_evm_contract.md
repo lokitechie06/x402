@@ -45,7 +45,8 @@ Both new functions use `receiveWithAuthorization` (not `transferWithAuthorizatio
      bytes32 public constant VOUCHER_TYPEHASH =
          keccak256("Voucher(bytes32 channelId,uint128 cumulativeAmount)");
 
-     uint64 public constant CLOSE_GRACE_PERIOD = 15 minutes;
+-    uint64 public constant CLOSE_GRACE_PERIOD = 15 minutes;
++    uint64 public constant CLOSE_GRACE_PERIOD = 60 minutes;
 
      // --- State ---
 
