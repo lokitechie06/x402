@@ -73,15 +73,81 @@ channelId = keccak256(abi.encode(payer, payee, token, salt, authorizedSigner, au
 
 ## PaymentRequirements
 
+### In 402 Response (Server → Client)
+
 | Field                       | Type      | Context              | Description                                                                 |
 | :-------------------------- | :-------- | :------------------- | :-------------------------------------------------------------------------- |
 | `extra.authorizedSettler`   | `string`  | Always               | Facilitator's signer address, used as `authorizedSettler` when opening channels |
 | `extra.assetTransferMethod` | `string`  | Optional             | `"eip3009"` (default) or `"permit2"` (future). Omit to use default.         |
-| `extra.channelId`           | `string`  | After channel open   | Existing channel for this client                                            |
-| `extra.cumulativeAmount`    | `string`  | After channel open   | Server's last-known cumulative amount                                       |
-| `extra.deposit`             | `string`  | After channel open   | Current channel deposit                                                     |
+| `extra.channelId`           | `string`  | Optional             | Included when server can identify client (e.g. via SIWX). Otherwise omitted. |
+| `extra.cumulativeAmount`    | `string`  | Optional             | Included when server can identify client. Otherwise omitted.                |
+| `extra.deposit`             | `string`  | Optional             | Included when server can identify client. Otherwise omitted.                |
 
 The `authorizedSettler` is the facilitator's onchain signer address. When opening a channel, the client MUST pass this address as the `authorizedSettler` parameter. This enables the facilitator to submit `settle` and `close` transactions on behalf of the server.
+
+> If `channelId`, `cumulativeAmount`, and `deposit` are omitted from the 402, the client MUST discover channel state via its own means: either from its last `PAYMENT-RESPONSE` (within a workflow) or via a contract read (see [Channel Discovery](#channel-discovery)).
+
+### In /verify Request (Server → Facilitator)
+
+For `voucher` and `topUp` payloads, the server enriches `paymentRequirements.extra` with its per-channel state before forwarding to the facilitator:
+
+| Field                       | Type      | Context               | Description                                                                 |
+| :-------------------------- | :-------- | :-------------------- | :-------------------------------------------------------------------------- |
+| `extra.authorizedSettler`   | `string`  | Always                | Facilitator's signer address                                                |
+| `extra.channelId`           | `string`  | `voucher` / `topUp`   | Channel being used                                                          |
+| `extra.cumulativeAmount`    | `string`  | `voucher` / `topUp`   | Server's `lastCumulativeAmount` for this channel                            |
+| `extra.deposit`             | `string`  | `voucher` / `topUp`   | Server's known deposit for this channel                                     |
+
+The facilitator uses `paymentRequirements.extra.cumulativeAmount` as the source of truth for the base amount cross-check (see [Verification Rules](./scheme_session.md#verification-rules-must)).
+
+---
+
+## Channel Discovery
+
+When a client has lost state and receives a generic 402 (no channel state), it must rediscover open channels via the contract. This requires **deterministic salt** so the client can compute channel IDs without server cooperation.
+
+### Deterministic Salt Convention (MUST)
+
+The `channelId` is computed from `(payer, payee, token, salt, authorizedSigner, authorizedSettler, contractAddress, chainId)`. For a stateless client to rediscover channels via contract reads, the salt MUST be deterministic:
+
+```
+salt = keccak256(abi.encode("x402-session", uint256(sequenceIndex)))
+```
+
+Where `sequenceIndex` starts at 0 and increments for concurrent channels between the same `(payer, payee, token, authorizedSigner, authorizedSettler)` tuple.
+
+See [`scheme_session_evm_contract.md`](./scheme_session_evm_contract.md) for the salt convention in the contract context.
+
+### Discovery Algorithm
+
+1. Client reads `payTo`, `asset`, `authorizedSettler` from the 402 response
+2. Client computes `channelId` values for indices 0, 1, 2, ... using the deterministic salt formula
+3. Client calls `getChannelsBatch([id0, id1, id2, ...])` -- single RPC call
+4. For each result, classify:
+   - `payer != address(0)` and `finalized == false` → **open channel** (usable)
+   - `payer == address(0)` and `finalized == true` → **closed channel** (skip, continue scanning)
+   - `payer == address(0)` and `finalized == false` → **never opened** (stop iterating)
+5. From open channels, select one with sufficient remaining balance (`deposit - settled >= amount`)
+6. Use the lowest never-opened index when opening a new channel
+
+### Resume Flow
+
+After discovering an open channel, the client anchors its voucher to the onchain `settled` amount:
+
+- Sets `accepted.extra.cumulativeAmount = settled` (from the contract read)
+- Signs `payload.cumulativeAmount = settled + amount`
+
+If the server has unsettled vouchers (its `lastCumulativeAmount > settled`), the facilitator detects the mismatch via the base amount cross-check and rejects with `session_stale_cumulative_amount`. The server then returns a **corrective 402** with its per-channel state, and the client retries with the correct base.
+
+### SIWX-Assisted Resume (Optional)
+
+If the server supports the [sign-in-with-x](../../extensions/sign-in-with-x.md) extension and the client provides a `SIGN-IN-WITH-X` header:
+
+1. The server recovers the client address from the SIWX token
+2. The server looks up open channels for that address
+3. The server includes channel state (`channelId`, `cumulativeAmount`, `deposit`) in the 402 `extra`
+
+This saves the contract read and avoids the potential stale-settled roundtrip.
 
 ---
 
@@ -99,7 +165,7 @@ function openWithERC3009(
     address payee,              // PaymentRequirements.payTo
     address token,              // PaymentRequirements.asset
     uint128 deposit,            // ≥ PaymentRequirements.amount
-    bytes32 salt,               // client-generated random salt
+    bytes32 salt,               // deterministic salt (see Channel Discovery)
     address authorizedSigner,   // 0x0 to use payer's own address, or a delegate
     address authorizedSettler,  // PaymentRequirements.extra.authorizedSettler (facilitator)
     uint256 validAfter,         // ERC-3009 authorization start time
@@ -166,7 +232,7 @@ The `channelOpen` and `topUp` payloads include an `erc3009Authorization` object:
       "payee": "0xServerPayeeAddress",
       "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
       "deposit": "100000",
-      "salt": "0x...client-generated random salt",
+      "salt": "0x...keccak256(abi.encode('x402-session', uint256(0)))",
       "authorizedSigner": "0x0000000000000000000000000000000000000000",
       "authorizedSettler": "0xFacilitatorSignerAddress",
       "erc3009Authorization": {
@@ -187,7 +253,7 @@ The `channelOpen` and `topUp` payloads include an `erc3009Authorization` object:
 
 **Type: `voucher`**
 
-The `accepted` block is echoed from the server's 402 response. It includes `extra.channelId` and `extra.cumulativeAmount`, which the facilitator uses for verification.
+The `accepted` block is constructed by the client, merging the 402 requirements with its own channel state. The `extra.channelId`, `extra.cumulativeAmount`, and `extra.deposit` come from the client's last `PAYMENT-RESPONSE` (or from a contract read after state loss). The facilitator cross-checks `accepted.extra.cumulativeAmount` against the server's truth in `paymentRequirements.extra.cumulativeAmount`.
 
 ```json
 {
@@ -218,7 +284,7 @@ The `accepted` block is echoed from the server's 402 response. It includes `extr
 
 **Type: `topUp`**
 
-The `accepted` block is echoed from the server's 402 response. The client determined a top-up was needed because `cumulativeAmount + amount > deposit`.
+The `accepted` block is constructed by the client from its own channel state. The client determined a top-up was needed because `cumulativeAmount + amount > deposit`.
 
 ```json
 {
@@ -269,7 +335,7 @@ The `accepted` block is echoed from the server's 402 response. The client determ
 | `payload.channelOpen.payee`                   | `string` | Required | Server's payee address (MUST match `payTo`)                                       |
 | `payload.channelOpen.token`                   | `string` | Required | Token contract address (MUST match `asset`)                                       |
 | `payload.channelOpen.deposit`                 | `string` | Required | Amount to deposit (≥ `amount`)                                                    |
-| `payload.channelOpen.salt`                    | `string` | Required | Client-generated random salt for `channelId` derivation                           |
+| `payload.channelOpen.salt`                    | `string` | Required | Deterministic salt for `channelId` derivation (see [Channel Discovery](#channel-discovery)) |
 | `payload.channelOpen.authorizedSigner`        | `string` | Required | Address authorized to sign vouchers (`0x0` = payer signs directly)                |
 | `payload.channelOpen.authorizedSettler`       | `string` | Required | MUST match `extra.authorizedSettler` from requirements                            |
 | `payload.channelOpen.erc3009Authorization`    | `object` | Required | ERC-3009 `receiveWithAuthorization` parameters                                    |
@@ -303,13 +369,15 @@ The `accepted` block is echoed from the server's 402 response. The client determ
 
 ## Facilitator Interface
 
-The session scheme uses the standard x402 facilitator interface (`/verify`, `/settle`, `/supported`). The facilitator is stateless and derives session context from `accepted.extra` (echoed by the client from the 402 response) and onchain channel state. 
+The session scheme uses the standard x402 facilitator interface (`/verify`, `/settle`, `/supported`). The facilitator is stateless and derives session context from `accepted.extra` (client's claimed state), `paymentRequirements.extra` (server's truth) and onchain channel state.
 
 ### POST /verify
 
 Verifies a payment payload without onchain interaction. Accepts all payload types.
 
 **Request (voucher — representative example):**
+
+The server enriches `paymentRequirements.extra` with its per-channel state (`channelId`, `cumulativeAmount`, `deposit`) for `voucher` and `topUp` payloads before forwarding to the facilitator:
 
 ```json
 {
@@ -345,11 +413,16 @@ Verifies a payment payload without onchain interaction. Accepts all payload type
     "payTo": "0xServerPayeeAddress",
     "maxTimeoutSeconds": 3600,
     "extra": {
-      "authorizedSettler": "0xFacilitatorSignerAddress"
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "channelId": "0xabc123...",
+      "cumulativeAmount": "4000",
+      "deposit": "100000"
     }
   }
 }
 ```
+
+> Note: `paymentRequirements.extra` now includes `channelId`, `cumulativeAmount`, and `deposit` (the server's truth). The facilitator cross-checks `accepted.extra.cumulativeAmount` against `paymentRequirements.extra.cumulativeAmount`.
 
 **Verification Logic:**
 
@@ -363,9 +436,13 @@ Verifies a payment payload without onchain interaction. Accepts all payload type
 
 5. **Balance check** (`channelOpen` and `topUp` only): For `channelOpen` and `topUp` payloads, verify the client has sufficient token balance (`≥ deposit` for opens, `≥ additionalDeposit` for top-ups). These flows follow the same pattern as a regular `exact` scheme payment — funds are not yet in escrow at verification time and are deposited only after settlement. For `voucher` payloads this check is not needed as funds are already held in the channel contract.
 
-6. **Amount validation** (using `accepted.extra`): The facilitator reads `lastCumulativeAmount` from `paymentPayload.accepted.extra.cumulativeAmount` and `deposit` from onchain `channel.deposit`. See verification rules in [`scheme_session.md`](./scheme_session.md).
+6. **Base amount cross-check**: `accepted.extra.cumulativeAmount` MUST equal `paymentRequirements.extra.cumulativeAmount`. If the client's claimed base does not match the server's truth, reject with `session_stale_cumulative_amount`.
 
-7. **Token and network match**: `channel.token` MUST equal `paymentRequirements.asset`. The contract MUST be on the correct chain.
+7. **Amount increment**: `payload.cumulativeAmount` MUST equal `accepted.extra.cumulativeAmount + paymentRequirements.amount`.
+
+8. **Deposit sufficiency**: `payload.cumulativeAmount` MUST be ≤ `paymentRequirements.extra.deposit`. For `topUp` payloads, `payload.cumulativeAmount` MUST be ≤ `paymentRequirements.extra.deposit + topUp.additionalDeposit`.
+
+9. **Token and network match**: `channel.token` MUST equal `paymentRequirements.asset`. The contract MUST be on the correct chain.
 
 **Response:**
 
@@ -420,7 +497,7 @@ Performs onchain operations. The facilitator infers the action from the payload:
 }
 ```
 
-The `extra` field contains updated session state. The server uses this to populate the `PAYMENT-RESPONSE` header. For `channelOpen` payloads, `extra.channelId` contains the newly created channel ID.
+The `extra` field contains updated session state. The server uses this to populate the `PAYMENT-RESPONSE` header and to update its own per-channel state for future `paymentRequirements.extra` enrichment. For `channelOpen` payloads, `extra.channelId` contains the newly created channel ID.
 
 ### GET /supported
 

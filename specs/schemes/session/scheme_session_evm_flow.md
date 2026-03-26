@@ -1,4 +1,6 @@
-# Session Scheme: EVM Full Lifecycle Example
+# Session Scheme: EVM Full Lifecycle Examples
+
+# Lifecycle 1: Self-Contained Session
 
 API charges **$0.10 per lookup** in USDC. The client opens a channel with a $1.00 deposit (enough for 10 requests), uses it, tops up when the deposit runs out and eventually closes.
 
@@ -33,7 +35,7 @@ The client requests the API. The server has no channel for this client and retur
 **Client request:**
 
 ```http
-GET /geocode?q=Times+Square HTTP/1.1
+GET /api/resource?q=example HTTP/1.1
 Host: api.example.com
 ```
 
@@ -98,7 +100,7 @@ The client decides to deposit $1.00 (`1000000`) to cover ~10 requests. It signs 
       "payee": "0xServerPayeeAddress",
       "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
       "deposit": "1000000",
-      "salt": "0xa1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+      "salt": "0x...keccak256(abi.encode('x402-session', uint256(0)))",
       "authorizedSigner": "0x0000000000000000000000000000000000000000",
       "authorizedSettler": "0xFacilitatorSignerAddress",
       "erc3009Authorization": {
@@ -146,7 +148,7 @@ The server forwards the payload to the facilitator for validation. The facilitat
         "payee": "0xServerPayeeAddress",
         "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         "deposit": "1000000",
-        "salt": "0xa1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+        "salt": "0x...keccak256(abi.encode('x402-session', uint256(0)))",
         "authorizedSigner": "0x0000000000000000000000000000000000000000",
         "authorizedSettler": "0xFacilitatorSignerAddress",
         "erc3009Authorization": {
@@ -250,7 +252,9 @@ The server returns 200 with the resource and a `PAYMENT-RESPONSE` header contain
 
 ## Step 3: Second Request — Client Signs Voucher for $0.20 Cumulative (No Onchain Transaction)
 
-The client makes another lookup. The server returns a 402 with the channel state. The client signs a new cumulative voucher incrementing by $0.10. The facilitator verifies the signature off-chain — no onchain transaction needed.
+The client makes another request. The server returns a **generic 402** (no channel state) — just the price and requirements. The client already knows its channel state from the `PAYMENT-RESPONSE` in Step 2. It merges the 402 price with its own state, signs a new cumulative voucher incrementing by $0.10, and sends it.
+
+The server reads the `channelId` from the client's payload, looks up its own per-channel state, and includes it in `paymentRequirements.extra` when forwarding to the facilitator. The facilitator cross-checks the client's base against the server's truth.
 
 ### `PAYMENT-REQUIRED` header (base64-decoded)
 
@@ -267,20 +271,20 @@ The client makes another lookup. The server returns a 402 with the channel state
       "payTo": "0xServerPayeeAddress",
       "maxTimeoutSeconds": 3600,
       "extra": {
-        "authorizedSettler": "0xFacilitatorSignerAddress",
-        "channelId": "0xabc123...channelId",
-        "cumulativeAmount": "100000",
-        "deposit": "1000000"
+        "authorizedSettler": "0xFacilitatorSignerAddress"
       }
     }
   ]
 }
 ```
 
-> `channelId` present → reuse existing channel.
+> Generic 402 — no channel state. Client uses its own state from the last `PAYMENT-RESPONSE`:
+> `channelId = "0xabc123..."`, `cumulativeAmount = 100000`, `deposit = 1000000`.
 > Client computes: 100000 + 100000 = 200000 ≤ 1000000 (deposit) → no top-up needed.
 
 ### `PAYMENT-SIGNATURE` header (base64-decoded)
+
+The client merges the 402 requirements with its own channel state into `accepted`:
 
 ```json
 {
@@ -308,7 +312,9 @@ The client makes another lookup. The server returns a 402 with the channel state
 }
 ```
 
-### Server → Facilitator: `POST /verify` — signature check only
+### Server → Facilitator: `POST /verify` — cross-check + signature verification
+
+The server reads `channelId` from the payload, looks up its own state (`lastCumulativeAmount = 100000`, `deposit = 1000000`), and includes it in `paymentRequirements.extra`:
 
 **Request:**
 
@@ -346,11 +352,19 @@ The client makes another lookup. The server returns a 402 with the channel state
     "payTo": "0xServerPayeeAddress",
     "maxTimeoutSeconds": 3600,
     "extra": {
-      "authorizedSettler": "0xFacilitatorSignerAddress"
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "channelId": "0xabc123...channelId",
+      "cumulativeAmount": "100000",
+      "deposit": "1000000"
     }
   }
 }
 ```
+
+> Facilitator checks:
+> 1. `accepted.extra.cumulativeAmount (100000) == paymentRequirements.extra.cumulativeAmount (100000)` ✓ base matches
+> 2. `payload.cumulativeAmount (200000) == accepted.extra.cumulativeAmount (100000) + amount (100000)` ✓ correct increment
+> 3. `payload.cumulativeAmount (200000) <= paymentRequirements.extra.deposit (1000000)` ✓ within deposit
 
 **Response:**
 
@@ -387,7 +401,7 @@ The client makes another lookup. The server returns a 402 with the channel state
 
 ## Step 4: Top-Up — Deposit Exhausted After 10 Requests, Client Adds $0.50
 
-On the 11th request, the server's 402 shows `cumulativeAmount` equals `deposit` ($1.00 each). The client detects that the next voucher ($1.10) would exceed the deposit and signs both an ERC-3009 authorization for a $0.50 top-up and a new voucher.
+On the 11th request, the server returns a generic 402 (price only). The client knows from its own state (last `PAYMENT-RESPONSE`) that `cumulativeAmount = 1000000 = deposit = 1000000`. Adding another $0.10 would exceed the deposit, so it signs both an ERC-3009 authorization for a $0.50 top-up and a new voucher.
 
 ### `PAYMENT-REQUIRED` header (base64-decoded)
 
@@ -404,16 +418,15 @@ On the 11th request, the server's 402 shows `cumulativeAmount` equals `deposit` 
       "payTo": "0xServerPayeeAddress",
       "maxTimeoutSeconds": 3600,
       "extra": {
-        "authorizedSettler": "0xFacilitatorSignerAddress",
-        "channelId": "0xabc123...channelId",
-        "cumulativeAmount": "1000000",
-        "deposit": "1000000"
+        "authorizedSettler": "0xFacilitatorSignerAddress"
       }
     }
   ]
 }
 ```
 
+> Generic 402 — no channel state. Client uses its own state:
+> `cumulativeAmount = 1000000`, `deposit = 1000000`.
 > Client computes: 1000000 + 100000 = 1100000 > 1000000 (deposit) → top-up required.
 > Client decides to add $0.50 (500000), bringing deposit to $1.50 (1500000) for 5 more requests.
 
@@ -459,7 +472,7 @@ On the 11th request, the server's 402 shows `cumulativeAmount` equals `deposit` 
 
 ### Server → Facilitator: `POST /verify` — validate top-up authorization + voucher
 
-The server forwards the payload to the facilitator for validation. The facilitator verifies the ERC-3009 authorization parameters for the additional deposit, checks that the client has sufficient token balance, validates the voucher signature against the channel's authorized signer, and confirms the new cumulative amount does not exceed the deposit + top-up. No onchain transaction occurs at this stage.
+The server reads the `channelId` from the payload, looks up its own state, and includes it in `paymentRequirements.extra`. The facilitator verifies the ERC-3009 authorization parameters for the additional deposit, checks the base amount cross-check, validates the voucher signature, and confirms the new cumulative amount does not exceed the deposit + top-up. No onchain transaction occurs at this stage.
 
 **Request:**
 
@@ -475,7 +488,10 @@ The server forwards the payload to the facilitator for validation. The facilitat
     "payTo": "0xServerPayeeAddress",
     "maxTimeoutSeconds": 3600,
     "extra": {
-      "authorizedSettler": "0xFacilitatorSignerAddress"
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "channelId": "0xabc123...channelId",
+      "cumulativeAmount": "1000000",
+      "deposit": "1000000"
     }
   }
 }
@@ -508,7 +524,10 @@ After verification succeeds, the server calls `/settle`. The facilitator sees `p
     "payTo": "0xServerPayeeAddress",
     "maxTimeoutSeconds": 3600,
     "extra": {
-      "authorizedSettler": "0xFacilitatorSignerAddress"
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "channelId": "0xabc123...channelId",
+      "cumulativeAmount": "1000000",
+      "deposit": "1000000"
     }
   }
 }
@@ -552,7 +571,7 @@ After verification succeeds, the server calls `/settle`. The facilitator sees `p
 
 ## Step 5: Close — Client Signs Final Voucher for $1.20 and Requests Channel Closure
 
-The client makes one more request and signals it is done by setting `requestClose: true`. The server verifies the voucher, serves the content, then tells the facilitator to close the channel. The contract settles $1.20 to the server and refunds $0.30 to the client.
+The client makes one more request and signals it is done by setting `requestClose: true`. The server returns a generic 402. The client knows from its own state that `cumulativeAmount = 1100000`, `deposit = 1500000`. The server verifies the voucher, serves the content, then tells the facilitator to close the channel. The contract settles $1.20 to the server and refunds $0.30 to the client.
 
 ### `PAYMENT-REQUIRED` header (base64-decoded)
 
@@ -569,16 +588,15 @@ The client makes one more request and signals it is done by setting `requestClos
       "payTo": "0xServerPayeeAddress",
       "maxTimeoutSeconds": 3600,
       "extra": {
-        "authorizedSettler": "0xFacilitatorSignerAddress",
-        "channelId": "0xabc123...channelId",
-        "cumulativeAmount": "1100000",
-        "deposit": "1500000"
+        "authorizedSettler": "0xFacilitatorSignerAddress"
       }
     }
   ]
 }
 ```
 
+> Generic 402 — no channel state. Client uses its own state:
+> `cumulativeAmount = 1100000`, `deposit = 1500000`.
 > Client computes: 1100000 + 100000 = 1200000 ≤ 1500000 → no top-up needed.
 > Client is done and sets `requestClose: true`.
 
@@ -611,7 +629,9 @@ The client makes one more request and signals it is done by setting `requestClos
 }
 ```
 
-### Server → Facilitator: `POST /verify` — check voucher signature
+### Server → Facilitator: `POST /verify` — cross-check + voucher signature
+
+The server includes its channel state in `paymentRequirements.extra`:
 
 **Request:**
 
@@ -650,7 +670,10 @@ The client makes one more request and signals it is done by setting `requestClos
     "payTo": "0xServerPayeeAddress",
     "maxTimeoutSeconds": 3600,
     "extra": {
-      "authorizedSettler": "0xFacilitatorSignerAddress"
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "channelId": "0xabc123...channelId",
+      "cumulativeAmount": "1100000",
+      "deposit": "1500000"
     }
   }
 }
@@ -683,7 +706,10 @@ The facilitator sees `requestClose: true` in the voucher payload and calls `clos
     "payTo": "0xServerPayeeAddress",
     "maxTimeoutSeconds": 3600,
     "extra": {
-      "authorizedSettler": "0xFacilitatorSignerAddress"
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "channelId": "0xabc123...channelId",
+      "cumulativeAmount": "1100000",
+      "deposit": "1500000"
     }
   }
 }
@@ -717,3 +743,409 @@ The facilitator sees `requestClose: true` in the voucher payload and calls `clos
 ```
 
 > Session complete. Total: 12 requests, $1.20 paid, $0.30 refunded. Three onchain transactions total (open, topUp, close).
+
+---
+---
+
+# Lifecycle 2: Resuming a Previous Session
+
+The client returns days later. The channel from Lifecycle 1 was **not** closed (imagine the client skipped the close step, or this is a different prior session). The client has lost all in-memory state — it has no `channelId`, `cumulativeAmount`, or `deposit`.
+
+## Actors & Constants (Same as Lifecycle 1)
+
+| Role                 | Value                                          |
+| :------------------- | :--------------------------------------------- |
+| Client (payer)       | `0xClientAddress`                              |
+| Server (payee)       | `0xServerPayeeAddress`                         |
+| Facilitator signer   | `0xFacilitatorSignerAddress`                   |
+| USDC on Base         | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`  |
+| Network              | `eip155:8453` (Base)                           |
+| Price per request    | `100000` ($0.10 USDC, 6 decimals)              |
+
+## Prior Channel State (from a previous session)
+
+| Field              | Value       | Description                         |
+| :----------------- | :---------- | :---------------------------------- |
+| `channelId`        | `0xdef456...` | Open channel from a prior session  |
+| `deposit`          | `1000000`   | $1.00 deposited                     |
+| `settled` (onchain)| `500000`    | $0.50 settled onchain by facilitator|
+| Server's `lastCumulativeAmount` | `800000` | $0.80 — server holds unsettled vouchers for $0.30 |
+
+## Lifecycle Summary
+
+| Step | Action                                    | Outcome                                              |
+| :--- | :---------------------------------------- | :--------------------------------------------------- |
+| 1    | Generic 402                               | Client learns price, no channel state                 |
+| 2a   | Contract Read + Voucher (stale → retry)   | Client discovers channel, anchors to `settled`, gets corrected |
+| 2b   | SIWX-Assisted Resume (alternative)        | Client identified, gets channel state in 402 directly |
+| 3    | Subsequent requests                       | Normal voucher flow (same as Lifecycle 1)             |
+
+---
+
+## Step 1: Generic 402
+
+The client hits the API. The server returns a generic 402 (no channel state, because it cannot identify the client).
+
+**Client request:**
+
+```http
+GET /api/resource?q=example HTTP/1.1
+Host: api.example.com
+```
+
+**Server response — `PAYMENT-REQUIRED` header (base64-decoded):**
+
+```json
+{
+  "x402Version": 2,
+  "error": "PAYMENT-SIGNATURE header is required",
+  "accepts": [
+    {
+      "scheme": "session",
+      "network": "eip155:8453",
+      "amount": "100000",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "payTo": "0xServerPayeeAddress",
+      "maxTimeoutSeconds": 3600,
+      "extra": {
+        "authorizedSettler": "0xFacilitatorSignerAddress"
+      }
+    }
+  ]
+}
+```
+
+> Generic 402 — no channel state. The client must discover its channel.
+
+---
+
+## Step 2a: Contract Read Path — Discover Channel, Anchor to Settled
+
+The client uses the deterministic salt convention to compute potential channel IDs and calls `getChannelsBatch()` to discover open channels.
+
+### Channel Discovery
+
+```
+salt_0 = keccak256(abi.encode("x402-session", uint256(0)))
+salt_1 = keccak256(abi.encode("x402-session", uint256(1)))
+
+channelId_0 = keccak256(abi.encode(
+  0xClientAddress,
+  0xServerPayeeAddress,
+  0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913,
+  salt_0,
+  0x0000000000000000000000000000000000000000,
+  0xFacilitatorSignerAddress,
+  contractAddress,
+  8453
+))
+// = 0xdef456... (matches the open channel from the prior session)
+```
+
+**Contract call: `getChannelsBatch([channelId_0, channelId_1])`**
+
+```json
+[
+  {
+    "payer": "0xClientAddress",
+    "payee": "0xServerPayeeAddress",
+    "token": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "deposit": "1000000",
+    "settled": "500000",
+    "finalized": false
+  },
+  {
+    "payer": "0x0000000000000000000000000000000000000000",
+    "finalized": false
+  }
+]
+```
+
+> Channel 0: `payer != 0x0` and `finalized == false` → **open channel**. Remaining: `1000000 - 500000 = 500000 >= 100000` ✓
+> Channel 1: `payer == 0x0` and `finalized == false` → **never opened** → stop.
+
+### Voucher Anchored to Onchain `settled`
+
+The client anchors to the onchain `settled` amount (500000) since it has no other state:
+
+**`PAYMENT-SIGNATURE` header (base64-decoded):**
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "session",
+    "network": "eip155:8453",
+    "amount": "100000",
+    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "payTo": "0xServerPayeeAddress",
+    "maxTimeoutSeconds": 3600,
+    "extra": {
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "channelId": "0xdef456...",
+      "cumulativeAmount": "500000",
+      "deposit": "1000000"
+    }
+  },
+  "payload": {
+    "type": "voucher",
+    "channelId": "0xdef456...",
+    "cumulativeAmount": "600000",
+    "signature": "0x...EIP-712 Voucher signature (cumulative $0.60)"
+  }
+}
+```
+
+> Client sets `accepted.extra.cumulativeAmount = 500000` (onchain `settled`).
+> Client signs `payload.cumulativeAmount = 500000 + 100000 = 600000`.
+
+### Server → Facilitator: `POST /verify` — Stale Base Detected
+
+The server reads `channelId` from the payload, looks up its own state (`lastCumulativeAmount = 800000`), and includes it in `paymentRequirements.extra`:
+
+**Request:**
+
+```json
+{
+  "x402Version": 2,
+  "paymentPayload": "« PAYMENT-SIGNATURE above »",
+  "paymentRequirements": {
+    "scheme": "session",
+    "network": "eip155:8453",
+    "amount": "100000",
+    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "payTo": "0xServerPayeeAddress",
+    "maxTimeoutSeconds": 3600,
+    "extra": {
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "channelId": "0xdef456...",
+      "cumulativeAmount": "800000",
+      "deposit": "1000000"
+    }
+  }
+}
+```
+
+**Facilitator cross-check:**
+
+1. `accepted.extra.cumulativeAmount (500000) == paymentRequirements.extra.cumulativeAmount (800000)` ✗ **MISMATCH**
+
+**Response:**
+
+```json
+{
+  "isValid": false,
+  "invalidReason": "session_stale_cumulative_amount"
+}
+```
+
+### Server → Client: Corrective 402
+
+The server returns a 402 **with** its per-channel state so the client can retry:
+
+**`PAYMENT-REQUIRED` header (base64-decoded):**
+
+```json
+{
+  "x402Version": 2,
+  "error": "session_stale_cumulative_amount",
+  "accepts": [
+    {
+      "scheme": "session",
+      "network": "eip155:8453",
+      "amount": "100000",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "payTo": "0xServerPayeeAddress",
+      "maxTimeoutSeconds": 3600,
+      "extra": {
+        "authorizedSettler": "0xFacilitatorSignerAddress",
+        "channelId": "0xdef456...",
+        "cumulativeAmount": "800000",
+        "deposit": "1000000"
+      }
+    }
+  ]
+}
+```
+
+### Client Retries with Correct Base
+
+**`PAYMENT-SIGNATURE` header (base64-decoded):**
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "session",
+    "network": "eip155:8453",
+    "amount": "100000",
+    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "payTo": "0xServerPayeeAddress",
+    "maxTimeoutSeconds": 3600,
+    "extra": {
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "channelId": "0xdef456...",
+      "cumulativeAmount": "800000",
+      "deposit": "1000000"
+    }
+  },
+  "payload": {
+    "type": "voucher",
+    "channelId": "0xdef456...",
+    "cumulativeAmount": "900000",
+    "signature": "0x...EIP-712 Voucher signature (cumulative $0.90)"
+  }
+}
+```
+
+### Server → Facilitator: `POST /verify` — Now Matches
+
+**Request:**
+
+```json
+{
+  "x402Version": 2,
+  "paymentPayload": "« PAYMENT-SIGNATURE above »",
+  "paymentRequirements": {
+    "scheme": "session",
+    "network": "eip155:8453",
+    "amount": "100000",
+    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "payTo": "0xServerPayeeAddress",
+    "maxTimeoutSeconds": 3600,
+    "extra": {
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "channelId": "0xdef456...",
+      "cumulativeAmount": "800000",
+      "deposit": "1000000"
+    }
+  }
+}
+```
+
+> Facilitator checks:
+> 1. `accepted.extra.cumulativeAmount (800000) == paymentRequirements.extra.cumulativeAmount (800000)` ✓
+> 2. `payload.cumulativeAmount (900000) == 800000 + 100000` ✓
+> 3. `payload.cumulativeAmount (900000) <= deposit (1000000)` ✓
+
+**Response:**
+
+```json
+{
+  "isValid": true,
+  "payer": "0xClientAddress"
+}
+```
+
+### `PAYMENT-RESPONSE` header (base64-decoded)
+
+```json
+{
+  "success": true,
+  "network": "eip155:8453",
+  "payer": "0xClientAddress",
+  "extra": {
+    "channelId": "0xdef456...",
+    "cumulativeAmount": "900000",
+    "deposit": "1000000"
+  }
+}
+```
+
+> Channel resumed. Client now has fresh state and subsequent requests proceed as in Lifecycle 1 (Step 3+).
+
+---
+
+## Step 2b: SIWX-Assisted Resume (Alternative to 2a)
+
+If the server supports the [sign-in-with-x](../../extensions/sign-in-with-x.md) extension, the client can skip the contract read entirely.
+
+### Client Request with SIWX
+
+```http
+GET /api/resource?q=example HTTP/1.1
+Host: api.example.com
+SIGN-IN-WITH-X: eyJ...base64-encoded SIWX token...
+```
+
+### Server Response — 402 WITH Channel State
+
+The server recovers the client address from the SIWX token, looks up open channels, and includes channel state in the 402:
+
+```json
+{
+  "x402Version": 2,
+  "error": "PAYMENT-SIGNATURE header is required",
+  "accepts": [
+    {
+      "scheme": "session",
+      "network": "eip155:8453",
+      "amount": "100000",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "payTo": "0xServerPayeeAddress",
+      "maxTimeoutSeconds": 3600,
+      "extra": {
+        "authorizedSettler": "0xFacilitatorSignerAddress",
+        "channelId": "0xdef456...",
+        "cumulativeAmount": "800000",
+        "deposit": "1000000"
+      }
+    }
+  ]
+}
+```
+
+> Channel state included in 402 — no contract read needed, no stale-settled risk.
+
+### Client Signs Correct Voucher Directly
+
+**`PAYMENT-SIGNATURE` header (base64-decoded):**
+
+```json
+{
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "session",
+    "network": "eip155:8453",
+    "amount": "100000",
+    "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "payTo": "0xServerPayeeAddress",
+    "maxTimeoutSeconds": 3600,
+    "extra": {
+      "authorizedSettler": "0xFacilitatorSignerAddress",
+      "channelId": "0xdef456...",
+      "cumulativeAmount": "800000",
+      "deposit": "1000000"
+    }
+  },
+  "payload": {
+    "type": "voucher",
+    "channelId": "0xdef456...",
+    "cumulativeAmount": "900000",
+    "signature": "0x...EIP-712 Voucher signature (cumulative $0.90)"
+  }
+}
+```
+
+### `PAYMENT-RESPONSE` header (base64-decoded)
+
+```json
+{
+  "success": true,
+  "network": "eip155:8453",
+  "payer": "0xClientAddress",
+  "extra": {
+    "channelId": "0xdef456...",
+    "cumulativeAmount": "900000",
+    "deposit": "1000000"
+  }
+}
+```
+
+> Channel resumed via SIWX. No extra roundtrips. Subsequent requests proceed as in Lifecycle 1.
+
+---
+
+## Step 3: Subsequent Requests
+
+After either Step 2a or 2b, the client has a fresh `PAYMENT-RESPONSE` with channel state. All subsequent requests follow the same pattern as Lifecycle 1, Step 3 — generic 402 for price, client merges with own state, signs voucher, server enriches `paymentRequirements.extra`.
