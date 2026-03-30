@@ -17,37 +17,13 @@ Default: `eip3009` if `extra.assetTransferMethod` is omitted.
 
 ## EVM Core Properties (MUST)
 
-The `deferred` scheme on EVM MUST enforce the following properties:
+The `deferred` scheme on EVM MUST enforce the following invariants:
 
-### 1. Cumulative Monotonic Vouchers
+1. **Cumulative Monotonic Vouchers**: Each voucher carries a `cumulativeAmount` strictly greater than the previous, with the delta equal to the per-request price. Only the highest voucher matters for settlement. This eliminates double-spend risk without per-voucher nonce tracking.
 
-Each voucher carries a `cumulativeAmount` that MUST be strictly greater than the previous voucher's amount. The increment between consecutive vouchers MUST equal the per-request price. Only the highest voucher matters for settlement.
+2. **Capital-Backed Escrow**: Clients deposit funds into an onchain channel before consuming resources. The deposit is refundable (unsettled remainder returns on close) and can be topped up. This guarantees the server can always settle up to the deposit amount without further client cooperation.
 
-- Rationale: Eliminates double-spend risk without requiring nonce tracking per voucher.
-
-### 2. Channel Deposit Model
-
-Clients deposit funds into an onchain escrow (channel) before consuming resources. The deposit is refundable: upon channel close, the unsettled remainder returns to the client. Deposits can be topped up without closing the channel.
-
-- Rationale: Guarantees the server can always settle up to the deposit amount without further client cooperation.
-
-### 3. Batched Onchain Settlement
-
-Settlement is deferred at the server's discretion. The server accumulates vouchers off-chain and settles when economically optimal (e.g. threshold-based, periodic, or on close).
-
-- Rationale: Amortizes gas costs across many requests.
-
-### 4. Facilitator Verification
-
-The facilitator verifies the client's signed voucher against onchain channel state: signature validity, channel existence, payee/token match, deposit sufficiency, and settlement floor. The server checks the cumulative amount increment locally. Concrete verification checklists are defined in [Verification Rules](#verification-rules-must).
-
-### 5. Server-Authorized Close
-
-Channel closure (`close`) MUST require an authorization signature from the payee or `authorizedSettler` (if designated). This prevents unauthorized parties from closing a channel and refunding the deposit before the server has settled earned funds. Settlement (`settle`) has no caller restriction — a valid client-signed voucher is the only requirement, and funds can only flow to the payee.
-
-### 6. Client State Verification
-
-The client MUST verify server-provided cumulative amounts before signing each voucher. In-session: confirm the returned `cumulativeAmount` incremented by exactly the request price. On recovery (after state loss): verify that the server-provided `lastSignature` recovers to the client's own key for the claimed `cumulativeAmount`. See [Client Verification Rules](#client-verification-rules-must).
+3. **Server-Authorized Close**: Channel closure MUST require a signature from the payee or `authorizedSettler`. This prevents unauthorized parties from closing a channel and refunding the deposit before the server has settled earned funds. Settlement has no caller restriction as funds can only flow to the payee.
 
 ---
 
