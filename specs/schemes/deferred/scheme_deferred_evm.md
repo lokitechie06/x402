@@ -2,7 +2,7 @@
 
 ## Summary
 
-The `deferred` scheme on EVM is a **capital-backed** network binding that uses a modified **TempoStreamChannel** contract for onchain escrow, settlement and channel lifecycle management. The client's commitment is backed by onchain capital deposited into the channel contract. Per-request payments are signed as off-chain cumulative vouchers; the server accumulates these and settles onchain at its discretion (batched or on close). The facilitator sponsors gas for all onchain operations.
+The `deferred` scheme on EVM is a **capital-backed** network binding that uses a modified **TempoStreamChannel** contract for onchain escrow, settlement and channel lifecycle management. The client's commitment is backed by onchain capital deposited into the channel contract. Per-request payments are signed as off-chain cumulative vouchers; the server accumulates these and settles onchain at its discretion (batched or on close).
 
 
 | AssetTransferMethod | Use Case                                            | Recommendation                                |
@@ -20,10 +20,9 @@ Default: `eip3009` if `extra.assetTransferMethod` is omitted.
 The `deferred` scheme on EVM MUST enforce the following invariants:
 
 1. **Cumulative Monotonic Vouchers**: Each voucher carries a `cumulativeAmount` strictly greater than the previous, with the delta equal to the per-request price. Only the highest voucher matters for settlement. This eliminates double-spend risk without per-voucher nonce tracking.
-
 2. **Capital-Backed Escrow**: Clients deposit funds into an onchain channel before consuming resources. The deposit is refundable (unsettled remainder returns on close) and can be topped up. This guarantees the server can always settle up to the deposit amount without further client cooperation.
-
 3. **Server-Authorized Close**: Channel closure MUST require a signature from the payee or `authorizedSettler`. This prevents unauthorized parties from closing a channel and refunding the deposit before the server has settled earned funds. Settlement has no caller restriction as funds can only flow to the payee.
+4. **Voucher Replay Protection**: Each settlement records the voucher's `cumulativeAmount` in `lastVoucherCumulativeAmount`. Subsequent settlements require a strictly higher `cumulativeAmount`. This prevents a server from settling a voucher for a partial amount and later replaying it to extract the remaining authorization gap (critical for dynamic pricing where `settleAmount <= cumulativeAmount`).
 
 ---
 
@@ -79,7 +78,7 @@ Close authorizations use the same EIP-712 domain as vouchers.
 **Type:**
 
 ```
-CloseAuthorization(bytes32 channelId, uint128 cumulativeAmount)
+CloseAuthorization(bytes32 channelId, uint128 settleAmount)
 ```
 
 ### Channel ID
@@ -104,7 +103,7 @@ channelId = keccak256(abi.encode(payer, payee, token, salt, authorizedSigner, au
 
 ### Generic 402 (Default)
 
-By default, the 402 contains only the pricing terms and the server's `authorizedSettler` address (close authorization signing key). 
+By default, the 402 contains only the pricing terms and the server's `authorizedSettler` address (close authorization signing key). `PaymentRequirements.amount` represents the **maximum** per-request price. 
 
 ```json
 {
@@ -139,9 +138,10 @@ When the server can identify the client (e.g. via [sign-in-with-x](../../extensi
     "name": "USDC",
     "version": "2",
     "channelId": "0xabc123...",
-    "cumulativeAmount": "500000",
-    "deposit": "1000000",
-    "lastSignature": "0x...voucher signature for cumulativeAmount"
+    "chargedCumulativeAmount": "3200",
+    "signedCumulativeAmount": "4000",
+    "signature": "0x...voucher signature for signedCumulativeAmount",
+    "deposit": "1000000"
   }
 }
 ```
@@ -149,16 +149,17 @@ When the server can identify the client (e.g. via [sign-in-with-x](../../extensi
 ### `extra` Field Reference
 
 
-| Field                       | Type     | Required | Description                                                                                                                                                             |
-| --------------------------- | -------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `extra.authorizedSettler`   | `string` | yes      | Server's close authorization signing address (delegate). If `address(0)`, payee signs close authorizations directly. Used as `authorizedSettler` when opening channels. |
-| `extra.assetTransferMethod` | `string` | optional | `"eip3009"` (default) or `"permit2"` (future). Omit to use default.                                                                                                     |
-| `extra.name`                | `string` | yes      | EIP-712 domain name of the token contract (e.g., `"USDC"`)                                                                                                              |
-| `extra.version`             | `string` | yes      | EIP-712 domain version of the token contract (e.g., `"2"`)                                                                                                              |
-| `extra.channelId`           | `string` | enriched | Channel identifier                                                                                                                                                      |
-| `extra.cumulativeAmount`    | `string` | enriched | Server's `lastCumulativeAmount`                                                                                                                                         |
-| `extra.deposit`             | `string` | enriched | Server's known deposit                                                                                                                                                  |
-| `extra.lastSignature`       | `string` | enriched | Client's voucher signature for `cumulativeAmount`                                                                                                                       |
+| Field                           | Type     | Required | Description                                                                                                                                                             |
+| ------------------------------- | -------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `extra.authorizedSettler`       | `string` | yes      | Server's close authorization signing address (delegate). If `address(0)`, payee signs close authorizations directly. Used as `authorizedSettler` when opening channels. |
+| `extra.assetTransferMethod`     | `string` | optional | `"eip3009"` (default) or `"permit2"` (future). Omit to use default.                                                                                                     |
+| `extra.name`                    | `string` | yes      | EIP-712 domain name of the token contract (e.g., `"USDC"`)                                                                                                              |
+| `extra.version`                 | `string` | yes      | EIP-712 domain version of the token contract (e.g., `"2"`)                                                                                                              |
+| `extra.channelId`               | `string` | enriched | Channel identifier                                                                                                                                                      |
+| `extra.chargedCumulativeAmount` | `string` | enriched | Actual accumulated cost (sum of per-request actual charges)                                                                                                             |
+| `extra.signedCumulativeAmount`  | `string` | enriched | `cumulativeAmount` from the latest client-signed voucher (>= `chargedCumulativeAmount`)                                                                                 |
+| `extra.signature`               | `string` | enriched | Client's voucher signature for `signedCumulativeAmount`                                                                                                                 |
+| `extra.deposit`                 | `string` | enriched | Server's known deposit                                                                                                                                                  |
 
 
 ---
@@ -167,7 +168,7 @@ When the server can identify the client (e.g. via [sign-in-with-x](../../extensi
 
 After receiving a 402, the client constructs a `PaymentPayload` containing its signed commitment. The payload type depends on the channel state:
 
-- `**channelOpen**`: No channel exists yet; client signs a token authorization and first voucher
+- `**channelOpen**`: No open channel exists; client signs a token authorization and first voucher
 - `**voucher**`: Channel exists with sufficient balance; client signs a new cumulative voucher
 - `**topUp**`: Channel exists but balance exhausted; client signs a token authorization and voucher
 
@@ -338,16 +339,17 @@ The server is the sole owner of per-channel state. The facilitator is stateless.
 The server MUST maintain the following per open channel:
 
 
-| State Field            | Type      | Description                                                             |
-| ---------------------- | --------- | ----------------------------------------------------------------------- |
-| `channelId`            | `bytes32` | Channel identifier                                                      |
-| `payer`                | `address` | Client address                                                          |
-| `lastCumulativeAmount` | `uint128` | Highest cumulative amount from a verified voucher                       |
-| `lastSignature`        | `bytes`   | Signature corresponding to `lastCumulativeAmount`                       |
-| `deposit`              | `uint128` | Current channel deposit (mirrored from facilitator `/verify` response)  |
-| `settled`              | `uint128` | Amount already settled onchain (mirrored from facilitator response)     |
-| `closeRequestedAt`     | `uint64`  | Close request timestamp, 0 if none (mirrored from facilitator response) |
-| `lastRequestTimestamp` | `uint64`  | Timestamp of the last paid request on this channel                      |
+| State Field               | Type      | Description                                                                             |
+| ------------------------- | --------- | --------------------------------------------------------------------------------------- |
+| `channelId`               | `bytes32` | Channel identifier                                                                      |
+| `payer`                   | `address` | Client address                                                                          |
+| `chargedCumulativeAmount` | `uint128` | Actual accumulated cost (sum of per-request actual charges)                             |
+| `signedCumulativeAmount`  | `uint128` | `cumulativeAmount` from the latest client-signed voucher (>= `chargedCumulativeAmount`) |
+| `signature`               | `bytes`   | Client's voucher signature for `signedCumulativeAmount`                                 |
+| `deposit`                 | `uint128` | Current channel deposit (mirrored from facilitator `/verify` response)                  |
+| `settled`                 | `uint128` | Amount already settled onchain (mirrored from facilitator response)                     |
+| `closeRequestedAt`        | `uint64`  | Close request timestamp, 0 if none (mirrored from facilitator response)                 |
+| `lastRequestTimestamp`    | `uint64`  | Timestamp of the last paid request on this channel                                      |
 
 
 ### Request Processing (MUST)
@@ -356,7 +358,13 @@ The server MUST NOT update voucher state until the resource handler has succeede
 
 1. **Verify**: Check increment locally, call facilitator `/verify`
 2. **Execute**: Run the resource handler
-3. **Commit** (on success only): Update `lastCumulativeAmount`, `lastSignature`, `lastRequestTimestamp`; mirror `deposit`, `settled`, `closeRequestedAt` from the facilitator response
+3. **Commit** (on success only):
+  - Determine `actualPrice` (the actual charge for this request, `<= PaymentRequirements.amount`)
+  - `chargedCumulativeAmount += actualPrice`
+  - `signedCumulativeAmount = payload.cumulativeAmount`
+  - `signature = payload.signature`
+  - Mirror `deposit`, `settled`, `closeRequestedAt` from the facilitator response
+  - Update `lastRequestTimestamp`
 4. **On handler failure**: Return an error without `PAYMENT-RESPONSE`. State is unchanged — the client can retry the same voucher.
 
 ---
@@ -399,12 +407,12 @@ The server mirrors `deposit`, `settled`, and `closeRequestedAt` into its per-cha
 Performs onchain operations. The facilitator infers the action from the payload:
 
 
-| `settleAction` | Payload Type  | Onchain Operation                                 | When Used                                        |
-| -------------- | ------------- | ------------------------------------------------- | ------------------------------------------------ |
-| `"open"`       | `channelOpen` | `openWithERC3009()`                               | First request — server opens the channel         |
-| `"topUp"`      | `topUp`       | `topUpWithERC3009()`                              | Client sent a top-up payload                     |
-| `"settle"`     | `voucher`     | `settle(channelId, amount, sig)`                  | Server batches settlement at its discretion      |
-| `"close"`      | `voucher`     | `close(channelId, amount, voucherSig, closeAuth)` | Client requested close or server-initiated close |
+| `settleAction` | Payload Type  | Onchain Operation                                                         | When Used                                        |
+| -------------- | ------------- | ------------------------------------------------------------------------- | ------------------------------------------------ |
+| `"open"`       | `channelOpen` | `openWithERC3009()`                                                       | First request — server opens the channel         |
+| `"topUp"`      | `topUp`       | `topUpWithERC3009()`                                                      | Client sent a top-up payload                     |
+| `"settle"`     | `voucher`     | `settle(channelId, cumulativeAmount, settleAmount, sig)`                  | Server batches settlement at its discretion      |
+| `"close"`      | `voucher`     | `close(channelId, cumulativeAmount, settleAmount, voucherSig, closeAuth)` | Client requested close or server-initiated close |
 
 
 **Request (voucher settle example):**
@@ -431,6 +439,7 @@ Performs onchain operations. The facilitator infers the action from the payload:
       "type": "voucher",
       "channelId": "0xabc123...",
       "cumulativeAmount": "5000",
+      "settleAmount": "3500",
       "signature": "0x...EIP-712 voucher signature",
       "requestClose": false
     }
@@ -455,8 +464,8 @@ Performs onchain operations. The facilitator infers the action from the payload:
 
 - `**channelOpen`**: Submit `openWithERC3009()` using `payload.channelOpen` parameters. Returns the `channelId` and transaction hash.
 - `**topUp`**: Submit `topUpWithERC3009()` using `payload.topUp` parameters. Returns the transaction hash.
-- `**voucher`**: Submit `settle(channelId, cumulativeAmount, signature)` using the highest voucher. The contract transfers the delta between the onchain `settled` amount and `cumulativeAmount` to the payee.
-- `**voucher` + `requestClose: true**`: Submit `close(channelId, cumulativeAmount, voucherSignature, closeAuthorization)` using the highest voucher and the `CloseAuthorization` signature provided by the server. The contract settles the final amount and refunds the remainder to the payer.
+- `**voucher`**: Submit `settle(channelId, cumulativeAmount, settleAmount, signature)` using the highest voucher. The contract transfers the delta between the onchain `settled` amount and `settleAmount` to the payee, and records `cumulativeAmount` as `lastVoucherCumulativeAmount` to prevent replay.
+- `**voucher` + `requestClose: true`**: Submit `close(channelId, cumulativeAmount, settleAmount, voucherSignature, closeAuthorization)` using the highest voucher and the `CloseAuthorization` signature provided by the server. The `CloseAuthorization` is signed over `settleAmount`. The contract settles the actual amount and refunds the remainder to the payer.
 
 **Response:**
 
@@ -466,9 +475,10 @@ Performs onchain operations. The facilitator infers the action from the payload:
   "transaction": "0x...transactionHash",
   "network": "eip155:8453",
   "payer": "0xPayerAddress",
+  "amount": "700",
   "extra": {
     "channelId": "0xabc123...",
-    "cumulativeAmount": "5000",
+    "chargedCumulativeAmount": "3200",
     "deposit": "100000",
     "settled": "0",
     "closeRequestedAt": 0
@@ -476,7 +486,7 @@ Performs onchain operations. The facilitator infers the action from the payload:
 }
 ```
 
-The `extra` field contains updated onchain channel state. The server mirrors `deposit`, `settled`, and `closeRequestedAt` into its per-channel state and uses them to populate the `PAYMENT-RESPONSE` header. For `channelOpen` payloads, `extra.channelId` contains the newly created channel ID.
+The `amount` field contains the actual charge for the request (`<= PaymentRequirements.amount`). The `extra` field contains updated channel state. `extra.chargedCumulativeAmount` is the actual accumulated cost across all requests. The server mirrors `deposit`, `settled`, and `closeRequestedAt` into its per-channel state and uses them along with `amount` and `chargedCumulativeAmount` to populate the `PAYMENT-RESPONSE` header. For `channelOpen` payloads, `extra.channelId` contains the newly created channel ID.
 
 ### GET /supported
 
@@ -504,6 +514,8 @@ A facilitator verifying a `deferred`-scheme payment on EVM MUST enforce:
 5. **Balance check** (`channelOpen` and `topUp` only): Verify the client has sufficient token balance (`≥ deposit` for opens, `≥ additionalDeposit` for top-ups). For `voucher` payloads this is not needed as funds are already in escrow.
 6. **Deposit sufficiency**: `payload.cumulativeAmount` MUST be ≤ `channel.deposit` (onchain). For `topUp` payloads, `payload.cumulativeAmount` MUST be ≤ `channel.deposit + topUp.additionalDeposit`.
 7. **Not below settled**: `payload.cumulativeAmount` MUST be > `channel.settled` (onchain). Prevents replay of already-settled vouchers.
+8. **Settle amount bounds** (settlement only): `settleAmount` MUST be `<= cumulativeAmount` and `settleAmount` MUST be `> channel.settled` (onchain).
+9. **Voucher replay protection** (settlement only): `cumulativeAmount` MUST be `> channel.lastVoucherCumulativeAmount` (onchain). This prevents a server from settling a voucher for a partial `settleAmount` and later replaying the same voucher to extract the remaining gap up to `cumulativeAmount`.
 
 The facilitator MUST return the onchain channel snapshot (`deposit`, `settled`, `closeRequestedAt`) in the `/verify` and `/settle` response `extra` field. If `closeRequestedAt != 0`, the server should settle immediately to protect its funds before the grace period expires.
 
@@ -511,13 +523,13 @@ The facilitator MUST return the onchain channel snapshot (`deposit`, `settled`, 
 
 The server MUST check the cumulative amount increment locally:
 
-- `payload.cumulativeAmount` MUST equal `lastCumulativeAmount + paymentRequirements.amount`
+- `payload.cumulativeAmount` MUST equal `chargedCumulativeAmount + paymentRequirements.amount`
+
+Note that the client bases its next voucher on the server-reported actual cumulative (from `PAYMENT-RESPONSE.extra.chargedCumulativeAmount`).
 
 If it fails, the server rejects with `deferred_stale_cumulative_amount` and returns a corrective 402.
 
 For time-critical applications the server may skip the `/verify` facilitator call for `voucher` payloads and perform the verification itself based on cached onchain state that is polled periodically.
-
-
 
 ---
 
@@ -563,9 +575,9 @@ Where `sequenceIndex` starts at 0 and increments for concurrent channels between
 
 ### Resume After Discovery
 
-After discovering an open channel, the client anchors its voucher to the onchain `settled` amount (`cumulativeAmount = settled + amount`). If the server has unsettled vouchers above settled, the server rejects with `session_stale_cumulative_amount` and returns a corrective 402 with its per-channel state and `lastSignature`. The client verifies the signature and retries. At most one extra roundtrip.
+After discovering an open channel, the client anchors its voucher to the onchain `settled` amount (`cumulativeAmount = settled + amount`). If the server has unsettled vouchers above settled, the server rejects with `session_stale_cumulative_amount` and returns a corrective 402 with its per-channel state including `chargedCumulativeAmount`, `signedCumulativeAmount`, and `signature`. The client verifies the signature and retries. At most one extra roundtrip.
 
-If the server supports the [sign-in-with-x](../../extensions/sign-in-with-x.md) extension and the client provides a `SIGN-IN-WITH-X` header, the server includes channel state in the 402 directly, skipping the contract read and potential stale-settled roundtrip. The client MUST verify `lastSignature` before using server-provided state (see [Client Verification Rules](#client-verification-rules-must)).
+If the server supports the [sign-in-with-x](../../extensions/sign-in-with-x.md) extension and the client provides a `SIGN-IN-WITH-X` header, the server includes channel state in the 402 directly, skipping the contract read and potential stale-settled roundtrip. The client MUST verify `signature` before using server-provided state (see [Client Verification Rules](#client-verification-rules-must)).
 
 ---
 
@@ -577,18 +589,23 @@ The facilitator's verification rules protect the server. The following rules pro
 
 Before using `PAYMENT-RESPONSE` values as the base for the next voucher, the client MUST check:
 
-1. **Cumulative amount increment**: `PAYMENT-RESPONSE.extra.cumulativeAmount` MUST equal `previousCumulativeAmount + requestAmount`. If the server inflates `cumulativeAmount`, the client would sign vouchers authorizing more than the actual cost.
-2. **Deposit consistency**: For non-topup responses, `PAYMENT-RESPONSE.extra.deposit` MUST equal the client's last known deposit. For topup responses, it MUST equal `previousDeposit + additionalDeposit`.
-3. **Channel ID consistency**: `PAYMENT-RESPONSE.extra.channelId` MUST match the channel the client is operating on.
+1. **Actual charge within bounds**: `PAYMENT-RESPONSE.amount` MUST be `<= PaymentRequirements.amount`. The server cannot charge more than the advertised maximum.
+2. **Cumulative amount increment**: `PAYMENT-RESPONSE.extra.chargedCumulativeAmount` MUST equal `previousChargedCumulativeAmount + PAYMENT-RESPONSE.amount`. If the server inflates the cumulative, the client would sign vouchers authorizing more than the actual cost.
+3. **Deposit consistency**: For non-topup responses, `PAYMENT-RESPONSE.extra.deposit` MUST equal the client's last known deposit. For topup responses, it MUST equal `previousDeposit + additionalDeposit`.
+4. **Channel ID consistency**: `PAYMENT-RESPONSE.extra.channelId` MUST match the channel the client is operating on.
+
+The client computes the next voucher as: `nextCumulativeAmount = PAYMENT-RESPONSE.extra.chargedCumulativeAmount + PaymentRequirements.amount`.
 
 If any check fails, the client MUST NOT sign further vouchers and SHOULD initiate channel closure.
 
 ### Recovery Verification
 
-When the client has lost state and receives a corrective 402 (or SIWX-enriched 402) containing channel state, the server MUST include `lastSignature`, ie the client's own voucher signature for the claimed `cumulativeAmount`.
+When the client has lost state and receives a corrective 402 (or SIWX-enriched 402) containing channel state, the server MUST include `signature` (the client's own voucher signature for `signedCumulativeAmount`) and `chargedCumulativeAmount` (the actual accumulated cost).
 
-1. **Voucher signature**: Compute the EIP-712 `Voucher(channelId, cumulativeAmount)` digest, recover the signer from `lastSignature`, confirm it matches the client's own address (or `authorizedSigner`).
-2. **Onchain consistency**: `extra.cumulativeAmount` MUST be ≥ the onchain `settled` amount. `extra.deposit` MUST match the onchain deposit.
+1. **Voucher signature**: Compute the EIP-712 `Voucher(channelId, signedCumulativeAmount)` digest, recover the signer from `signature`, confirm it matches the client's own address (or `authorizedSigner`).
+2. **Charged within signed**: `chargedCumulativeAmount` MUST be `<= signedCumulativeAmount`. The server cannot claim more than the client authorized.
+3. **Onchain consistency**: `chargedCumulativeAmount` MUST be ≥ the onchain `settled` amount. `extra.deposit` MUST match the onchain deposit.
+4. **Resume**: The client resumes with `chargedCumulativeAmount` as the base for the next voucher (`nextCumulativeAmount = chargedCumulativeAmount + PaymentRequirements.amount`).
 
 If the signature does not verify, the client MUST NOT sign based on the server's claimed state and SHOULD fall back to unilateral channel closure.
 
@@ -598,7 +615,7 @@ If the signature does not verify, the client MUST NOT sign based on the server's
 
 **Reusing Existing Channels**: If a client has an open, non-finalized channel to the same `(payee, token)` with sufficient remaining balance (`deposit - settled ≥ amount`), it SHOULD reuse it rather than opening a new one. Servers MUST support receiving vouchers for any open channel where they are the payee.
 
-**Cooperative Close**: The client includes `requestClose: true` in a voucher payload. The server processes the request normally, then signs a `CloseAuthorization(channelId, lastCumulativeAmount)` with its payee key or `authorizedSettler` delegate and includes it in the `/settle` request to the facilitator. The facilitator sees `requestClose: true` in the payload and calls `TempoStreamChannel.close(channelId, cumulativeAmount, voucherSignature, closeAuthorization)`. The contract verifies the `CloseAuthorization` signature, settles the final amount to the payee, and refunds the remainder to the payer. If no identification extensions are in use and the client does not persist state, it SHOULD close the channel at the end of its session to avoid resume complexity.
+**Cooperative Close**: The client includes `requestClose: true` in a voucher payload. The server processes the request normally, determines the `settleAmount`, then signs a `CloseAuthorization(channelId, settleAmount)` with its payee key or `authorizedSettler` delegate and includes it in the `/settle` request to the facilitator. The facilitator sees `requestClose: true` in the payload and calls `TempoStreamChannel.close(channelId, cumulativeAmount, settleAmount, voucherSignature, closeAuthorization)`. The contract verifies the `CloseAuthorization` signature over `settleAmount`, settles the actual earned amount to the payee, and refunds the remainder to the payer. If no identification extensions are in use and the client does not persist state, it SHOULD close the channel at the end of its session to avoid resume complexity.
 
 **Unilateral Close (Escape Hatch)**: If the server becomes unresponsive and the client cannot initiate a cooperative close, the client calls `TempoStreamChannel.requestClose(channelId)` directly onchain, paying gas themselves. This starts the `CLOSE_GRACE_PERIOD`. The server can still settle outstanding vouchers via the facilitator during this period. After the grace period, the client calls `withdraw()` to reclaim all unsettled funds. 
 
@@ -630,4 +647,5 @@ The EVM network binding additionally defines these binding-specific codes:
 
 | Version | Date       | Changes       | Author    |
 | ------- | ---------- | ------------- | --------- |
+| v0.2    | 2025-03-30 | Add dynamic price | @phdargen |
 | v0.1    | 2025-03-21 | Initial draft | @phdargen |

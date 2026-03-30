@@ -2,19 +2,19 @@
 
 # Lifecycle 1: Self-Contained Session
 
-API charges **$0.10 per lookup** in USDC. The client opens a channel with a $1.00 deposit (enough for 10 requests), uses it, tops up when the deposit runs out and eventually closes.
+API charges a maximum of **$0.10 per request** in USDC. The client opens a channel with a $1.00 deposit (enough for 10 requests), uses it, tops up when the deposit runs out and eventually closes.
 
 ## Actors & Constants
 
 
-| Role              | Value                                        |
-| ----------------- | -------------------------------------------- |
-| Client (payer)    | `0xClientAddress`                            |
-| Server (payee)    | `0xServerPayeeAddress`                       |
-| Server settler    | `0xServerSettlerAddress`                     |
-| USDC on Base      | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
-| Network           | `eip155:8453` (Base)                         |
-| Price per request | `100000` ($0.10 USDC, 6 decimals)            |
+| Role                 | Value                                        |
+| -------------------- | -------------------------------------------- |
+| Client (payer)       | `0xClientAddress`                            |
+| Server (payee)       | `0xServerPayeeAddress`                       |
+| Server settler       | `0xServerSettlerAddress`                     |
+| USDC on Base         | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
+| Network              | `eip155:8453` (Base)                         |
+| Max price per request | `100000` ($0.10 USDC, 6 decimals)         |
 
 
 ## Lifecycle Summary
@@ -239,9 +239,12 @@ After verification succeeds, the server calls `/settle`. The facilitator sees `p
   "transaction": "0x...openWithERC3009 txHash",
   "network": "eip155:8453",
   "payer": "0xClientAddress",
+  "amount": "100000",
   "extra": {
     "channelId": "0xabc123...channelId",
-    "cumulativeAmount": "100000",
+    "chargedCumulativeAmount": "100000",
+    "signedCumulativeAmount": "100000",
+    "signature": "0x...EIP-712 Voucher signature for signedCumulativeAmount 100000",
     "deposit": "1000000",
     "settled": "0",
     "closeRequestedAt": 0
@@ -259,9 +262,12 @@ The server returns 200 with the resource and a `PAYMENT-RESPONSE` header contain
   "transaction": "0x...openWithERC3009 txHash",
   "network": "eip155:8453",
   "payer": "0xClientAddress",
+  "amount": "100000",
   "extra": {
     "channelId": "0xabc123...channelId",
-    "cumulativeAmount": "100000",
+    "chargedCumulativeAmount": "100000",
+    "signedCumulativeAmount": "100000",
+    "signature": "0x...EIP-712 Voucher signature for signedCumulativeAmount 100000",
     "deposit": "1000000",
     "settled": "0",
     "closeRequestedAt": 0
@@ -277,7 +283,6 @@ The server returns 200 with the resource and a `PAYMENT-RESPONSE` header contain
 
 The client makes another request. The server returns a **generic 402** (no channel state) — just the price and requirements. The client already knows its channel state from the `PAYMENT-RESPONSE` in Step 2. It signs a new cumulative voucher incrementing by $0.10 and sends it.
 
-The server reads the `channelId` from the client's payload, looks up its own per-channel state, and **first** checks `payload.cumulativeAmount == lastCumulativeAmount + amount`; if that fails it rejects with `deferred_stale_cumulative_amount` before calling `/verify`. When calling `/verify`, it includes server truth in `paymentRequirements.extra` so the facilitator can validate signature, channel, deposit sufficiency, and `cumulativeAmount > onchain settled`. The server mirrors `deposit`, `settled`, and `closeRequestedAt` from the `/verify` response into per-channel state after a successful handler (see [Request Processing](./scheme_deferred_evm.md#request-processing-must)).
 
 ### `PAYMENT-REQUIRED` header (base64-decoded)
 
@@ -304,8 +309,8 @@ The server reads the `channelId` from the client's payload, looks up its own per
 ```
 
 > Generic 402 — no channel state. Client uses its own state from the last `PAYMENT-RESPONSE`:
-> `channelId = "0xabc123..."`, `cumulativeAmount = 100000`, `deposit = 1000000`.
-> Client computes: 100000 + 100000 = 200000 ≤ 1000000 (deposit) → no top-up needed.
+> `channelId = "0xabc123..."`, `chargedCumulativeAmount = 100000`, `deposit = 1000000`.
+> Client computes: `nextCumulativeAmount = 100000 + 100000 = 200000` ≤ `1000000` (deposit) → no top-up needed.
 
 ### `PAYMENT-SIGNATURE` header (base64-decoded)
 
@@ -339,7 +344,7 @@ The client signs a voucher using its own channel state:
 
 ### Server → Facilitator: `POST /verify` — cross-check + signature verification
 
-The server reads `channelId` from the payload, looks up its own state (`lastCumulativeAmount = 100000`, `deposit = 1000000`), and includes it in `paymentRequirements.extra`:
+
 
 **Request:**
 
@@ -380,10 +385,6 @@ The server reads `channelId` from the payload, looks up its own state (`lastCumu
       "authorizedSettler": "0xServerSettlerAddress",
       "name": "USDC",
       "version": "2",
-      "channelId": "0xabc123...channelId",
-      "cumulativeAmount": "100000",
-      "deposit": "1000000",
-      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 100000"
     }
   }
 }
@@ -415,9 +416,12 @@ The server reads `channelId` from the payload, looks up its own state (`lastCumu
   "success": true,
   "network": "eip155:8453",
   "payer": "0xClientAddress",
+  "amount": "100000",
   "extra": {
     "channelId": "0xabc123...channelId",
-    "cumulativeAmount": "200000",
+    "chargedCumulativeAmount": "200000",
+    "signedCumulativeAmount": "200000",
+    "signature": "0x...EIP-712 Voucher signature for signedCumulativeAmount 200000",
     "deposit": "1000000",
     "settled": "0",
     "closeRequestedAt": 0
@@ -461,7 +465,7 @@ On the 11th request, the server returns a generic 402 (price only). The client k
 ```
 
 > Generic 402 — no channel state. Client uses its own state:
-> `cumulativeAmount = 1000000`, `deposit = 1000000`.
+> `chargedCumulativeAmount = 1000000`, `deposit = 1000000`.
 > Client computes: 1000000 + 100000 = 1100000 > 1000000 (deposit) → top-up required.
 > Client decides to add $0.50 (500000), bringing deposit to $1.50 (1500000) for 5 more requests.
 
@@ -506,7 +510,7 @@ On the 11th request, the server returns a generic 402 (price only). The client k
 
 ### Server → Facilitator: `POST /verify` — validate top-up authorization + voucher
 
-The server reads the `channelId` from the payload, looks up its state, and checks `1100000 == 1000000 + 100000` ✓ before calling `/verify`. It includes server truth in `paymentRequirements.extra`. The facilitator verifies the ERC-3009 authorization for `additionalDeposit`, EIP-712 voucher per [Verification Rules](./scheme_deferred_evm.md#verification-rules-must), and `cumulativeAmount` ≤ `channel.deposit + topUp.additionalDeposit`. No onchain transaction occurs at this stage.
+The server reads the `channelId` from the payload, looks up its state, and checks `1100000 == 1000000 + 100000` ✓ before calling `/verify`. 
 
 **Request:**
 
@@ -526,9 +530,6 @@ The server reads the `channelId` from the payload, looks up its state, and check
       "name": "USDC",
       "version": "2",
       "channelId": "0xabc123...channelId",
-      "cumulativeAmount": "1000000",
-      "deposit": "1000000",
-      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 1000000"
     }
   }
 }
@@ -570,9 +571,6 @@ After verification succeeds, the server calls `/settle`. The facilitator sees `p
       "name": "USDC",
       "version": "2",
       "channelId": "0xabc123...channelId",
-      "cumulativeAmount": "1000000",
-      "deposit": "1000000",
-      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 1000000"
     }
   }
 }
@@ -586,9 +584,12 @@ After verification succeeds, the server calls `/settle`. The facilitator sees `p
   "transaction": "0x...topUpWithERC3009 txHash",
   "network": "eip155:8453",
   "payer": "0xClientAddress",
+  "amount": "100000",
   "extra": {
     "channelId": "0xabc123...channelId",
-    "cumulativeAmount": "1100000",
+    "chargedCumulativeAmount": "1100000",
+    "signedCumulativeAmount": "1100000",
+    "signature": "0x...EIP-712 Voucher signature for signedCumulativeAmount 1100000",
     "deposit": "1500000",
     "settled": "0",
     "closeRequestedAt": 0
@@ -604,9 +605,12 @@ After verification succeeds, the server calls `/settle`. The facilitator sees `p
   "transaction": "0x...topUpWithERC3009 txHash",
   "network": "eip155:8453",
   "payer": "0xClientAddress",
+  "amount": "100000",
   "extra": {
     "channelId": "0xabc123...channelId",
-    "cumulativeAmount": "1100000",
+    "chargedCumulativeAmount": "1100000",
+    "signedCumulativeAmount": "1100000",
+    "signature": "0x...EIP-712 Voucher signature for signedCumulativeAmount 1100000",
     "deposit": "1500000",
     "settled": "0",
     "closeRequestedAt": 0
@@ -620,7 +624,7 @@ After verification succeeds, the server calls `/settle`. The facilitator sees `p
 
 ## Step 5: Close — Client Signs Final Voucher for $1.20 and Requests Channel Closure
 
-The client makes one more request and signals it is done by setting `requestClose: true`. The server returns a generic 402. The client knows from its own state that `cumulativeAmount = 1100000`, `deposit = 1500000`. The server verifies the voucher, serves the content, then tells the facilitator to close the channel. The contract settles $1.20 to the server and refunds $0.30 to the client.
+The client makes one more request and signals it is done by setting `requestClose: true`. 
 
 ### `PAYMENT-REQUIRED` header (base64-decoded)
 
@@ -647,7 +651,7 @@ The client makes one more request and signals it is done by setting `requestClos
 ```
 
 > Generic 402 — no channel state. Client uses its own state:
-> `cumulativeAmount = 1100000`, `deposit = 1500000`.
+> `chargedCumulativeAmount = 1100000`, `deposit = 1500000`.
 > Client computes: 1100000 + 100000 = 1200000 ≤ 1500000 → no top-up needed.
 > Client is done and sets `requestClose: true`.
 
@@ -722,10 +726,6 @@ The server checks `1200000 == 1100000 + 100000` ✓, then includes its channel s
       "authorizedSettler": "0xServerSettlerAddress",
       "name": "USDC",
       "version": "2",
-      "channelId": "0xabc123...channelId",
-      "cumulativeAmount": "1100000",
-      "deposit": "1500000",
-      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 1100000"
     }
   }
 }
@@ -747,8 +747,7 @@ The server checks `1200000 == 1100000 + 100000` ✓, then includes its channel s
 
 ### Server → Facilitator: `POST /settle` — close channel onchain
 
-The server signs a `CloseAuthorization(channelId, 1200000)` with its `authorizedSettler` delegate and includes it in the settle request. The facilitator sees `requestClose: true` in the voucher payload and calls `close(channelId, 1200000, voucherSignature, closeAuthorization)`. The contract verifies the `CloseAuthorization`, settles the final amount to the server, and refunds the remainder to the client.
-
+The server signs a `CloseAuthorization(channelId, 1200000)` with its `authorizedSettler` delegate and includes it in the settle request. 
 **Request:**
 
 ```json
@@ -767,10 +766,10 @@ The server signs a `CloseAuthorization(channelId, 1200000)` with its `authorized
       "name": "USDC",
       "version": "2",
       "channelId": "0xabc123...channelId",
-      "cumulativeAmount": "1100000",
-      "deposit": "1500000",
-      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 1100000",
-      "closeAuthorization": "0x...EIP-712 CloseAuthorization signature from server settler"
+      "chargedCumulativeAmount": "1100000",
+      "signedCumulativeAmount": "1100000",
+      "signature": "0x...EIP-712 Voucher signature for signedCumulativeAmount 1100000",
+      "closeAuthorization": "0x...EIP-712 CloseAuthorization signature from server settler (over settleAmount 1200000)"
     }
   }
 }
@@ -784,9 +783,12 @@ The server signs a `CloseAuthorization(channelId, 1200000)` with its `authorized
   "transaction": "0x...close txHash",
   "network": "eip155:8453",
   "payer": "0xClientAddress",
+  "amount": "100000",
   "extra": {
     "channelId": "0xabc123...channelId",
-    "cumulativeAmount": "1200000",
+    "chargedCumulativeAmount": "1200000",
+    "signedCumulativeAmount": "1200000",
+    "signature": "0x...EIP-712 Voucher signature for signedCumulativeAmount 1200000",
     "deposit": "1500000",
     "settled": "1200000",
     "closeRequestedAt": 0
@@ -796,7 +798,7 @@ The server signs a `CloseAuthorization(channelId, 1200000)` with its `authorized
 
 > Onchain result of `close()`:
 >
-> - $1.20 (1200000) settled to `0xServerPayeeAddress`
+> - $1.20 (1200000) settled to `0xServerPayeeAddress` (`settleAmount`)
 > - $0.30 (300000) refunded to `0xClientAddress`
 > - Channel marked as `finalized`
 
@@ -808,9 +810,12 @@ The server signs a `CloseAuthorization(channelId, 1200000)` with its `authorized
   "transaction": "0x...close txHash",
   "network": "eip155:8453",
   "payer": "0xClientAddress",
+  "amount": "100000",
   "extra": {
     "channelId": "0xabc123...channelId",
-    "cumulativeAmount": "1200000",
+    "chargedCumulativeAmount": "1200000",
+    "signedCumulativeAmount": "1200000",
+    "signature": "0x...EIP-712 Voucher signature for signedCumulativeAmount 1200000",
     "deposit": "1500000",
     "settled": "1200000",
     "closeRequestedAt": 0
@@ -826,7 +831,7 @@ The server signs a `CloseAuthorization(channelId, 1200000)` with its `authorized
 
 # Lifecycle 2: Resuming a Previous Session
 
-The client returns days later. The channel from Lifecycle 1 was **not** closed (imagine the client skipped the close step, or this is a different prior session). The client has lost all in-memory state — it has no `channelId`, `cumulativeAmount`, or `deposit`.
+The client returns days later. The channel from Lifecycle 1 was **not** closed (imagine the client skipped the close step, or this is a different prior session). The client has lost all in-memory state — it has no `channelId`, `chargedCumulativeAmount`, or `deposit`.
 
 ## Actors & Constants (Same as Lifecycle 1)
 
@@ -838,18 +843,19 @@ The client returns days later. The channel from Lifecycle 1 was **not** closed (
 | Server settler    | `0xServerSettlerAddress`                     |
 | USDC on Base      | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
 | Network           | `eip155:8453` (Base)                         |
-| Price per request | `100000` ($0.10 USDC, 6 decimals)            |
+| Max price per request | `100000` ($0.10 USDC, 6 decimals)          |
 
 
 ## Prior Channel State (from a previous session)
 
 
-| Field                           | Value         | Description                                       |
-| ------------------------------- | ------------- | ------------------------------------------------- |
-| `channelId`                     | `0xdef456...` | Open channel from a prior session                 |
-| `deposit`                       | `1000000`     | $1.00 deposited                                   |
-| `settled` (onchain)             | `500000`      | $0.50 settled onchain by facilitator              |
-| Server's `lastCumulativeAmount` | `800000`      | $0.80 — server holds unsettled vouchers for $0.30 |
+| Field                            | Value         | Description                                                                          |
+| -------------------------------- | ------------- | ------------------------------------------------------------------------------------ |
+| `channelId`                      | `0xdef456...` | Open channel from a prior session                                                    |
+| `deposit`                        | `1000000`     | $1.00 deposited                                                                      |
+| `settled` (onchain)              | `500000`      | $0.50 settled onchain by facilitator                                                 |
+| `chargedCumulativeAmount`        | `800000`      | $0.80 actually accumulated (here equal to `signedCumulativeAmount`)                  |
+| `signedCumulativeAmount`         | `800000`      | Latest client voucher cumulative; $0.30 not yet settled onchain (`800000 − 500000`) |
 
 
 ## Lifecycle Summary
@@ -981,15 +987,15 @@ The client anchors to the onchain `settled` amount (500000) since it has no othe
 }
 ```
 
-> Client signs `payload.cumulativeAmount = 500000 (onchain settled) + 100000 = 600000`.
+> Client mistakenly signs `payload.cumulativeAmount = 500000 (onchain settled) + 100000 = 600000` instead of **`chargedCumulativeAmount + amount`**.
 
 ### Server detects stale resume (no `/verify` roundtrip)
 
-The server reads `channelId` from the payload and looks up its state (`lastCumulativeAmount = 800000`). Per [Server Check](./scheme_deferred_evm.md#verification-rules-must) it requires `payload.cumulativeAmount == lastCumulativeAmount + amount`. Here `600000 != 800000 + 100000` — the client anchored to onchain `settled` only, but the server already accepted vouchers up to $0.80 off-chain. Per [Resume After Discovery](./scheme_deferred_evm.md#resume-after-discovery), the server responds with `session_stale_cumulative_amount` and does **not** need to call `/verify` for this failure.
+The server reads `channelId` from the payload and looks up its state (`chargedCumulativeAmount = 800000`). Per [Server Check](./scheme_deferred_evm.md#verification-rules-must) it requires `payload.cumulativeAmount == chargedCumulativeAmount + paymentRequirements.amount`. Here `600000 != 800000 + 100000` — the client anchored to onchain `settled` only, but the server already recorded **`chargedCumulativeAmount` = 800000** off-chain. Per [Resume After Discovery](./scheme_deferred_evm.md#resume-after-discovery), the server responds with `session_stale_cumulative_amount` and does **not** need to call `/verify` for this failure.
 
 ### Server → Client: Corrective 402
 
-The server returns a 402 **with** its per-channel state and `lastSignature` so the client can verify and retry:
+The server returns a 402 **with** its per-channel state and the client’s voucher **`signature`** so the client can verify and retry:
 
 `**PAYMENT-REQUIRED` header (base64-decoded):**
 
@@ -1009,10 +1015,6 @@ The server returns a 402 **with** its per-channel state and `lastSignature` so t
         "authorizedSettler": "0xServerSettlerAddress",
         "name": "USDC",
         "version": "2",
-        "channelId": "0xdef456...",
-        "cumulativeAmount": "800000",
-        "deposit": "1000000",
-        "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 800000"
       }
     }
   ]
@@ -1021,12 +1023,12 @@ The server returns a 402 **with** its per-channel state and `lastSignature` so t
 
 ### Client Verifies and Retries with Correct Base
 
-The client verifies `lastSignature` before trusting the server's claimed state:
+The client verifies `signature` before trusting the server's claimed state:
 
-1. Compute EIP-712 digest: `Voucher(channelId = 0xdef456..., cumulativeAmount = 800000)` using the [voucher domain](./scheme_deferred_evm.md#voucher-eip-712-type) (`name: "Tempo Stream Channel"`, `version: "1"`)
-2. Recover signer from `lastSignature`
+1. Compute EIP-712 digest: `Voucher(channelId = 0xdef456..., cumulativeAmount = 800000)` (matching **`signedCumulativeAmount`**) using the [voucher domain](./scheme_deferred_evm.md#voucher-eip-712-type) (`name: "Tempo Stream Channel"`, `version: "1"`)
+2. Recover signer from `signature`
 3. Confirm recovered signer matches the client's own address → the client provably signed a voucher for 800000
-4. Confirm `800000 >= 500000` (onchain `settled` from the earlier contract read) → consistent with onchain state
+4. Confirm `chargedCumulativeAmount` (`800000`) ≥ onchain `settled` (`500000`) → consistent with onchain state ([Recovery Verification](./scheme_deferred_evm.md#recovery-verification))
 
 `**PAYMENT-SIGNATURE` header (base64-decoded):**
 
@@ -1044,10 +1046,6 @@ The client verifies `lastSignature` before trusting the server's claimed state:
       "authorizedSettler": "0xServerSettlerAddress",
       "name": "USDC",
       "version": "2",
-      "channelId": "0xdef456...",
-      "cumulativeAmount": "800000",
-      "deposit": "1000000",
-      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 800000"
     }
   },
   "payload": {
@@ -1079,10 +1077,6 @@ The client verifies `lastSignature` before trusting the server's claimed state:
       "authorizedSettler": "0xServerSettlerAddress",
       "name": "USDC",
       "version": "2",
-      "channelId": "0xdef456...",
-      "cumulativeAmount": "800000",
-      "deposit": "1000000",
-      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 800000"
     }
   }
 }
@@ -1112,9 +1106,12 @@ The client verifies `lastSignature` before trusting the server's claimed state:
   "success": true,
   "network": "eip155:8453",
   "payer": "0xClientAddress",
+  "amount": "100000",
   "extra": {
     "channelId": "0xdef456...",
-    "cumulativeAmount": "900000",
+    "chargedCumulativeAmount": "900000",
+    "signedCumulativeAmount": "900000",
+    "signature": "0x...EIP-712 Voucher signature for signedCumulativeAmount 900000",
     "deposit": "1000000",
     "settled": "500000",
     "closeRequestedAt": 0
@@ -1140,7 +1137,7 @@ SIGN-IN-WITH-X: eyJ...base64-encoded SIWX token...
 
 ### Server Response — 402 WITH Channel State
 
-The server recovers the client address from the SIWX token, looks up open channels, and includes channel state and `lastSignature` in the 402:
+The server recovers the client address from the SIWX token, looks up open channels, and includes channel state and the voucher **`signature`** in the 402:
 
 ```json
 {
@@ -1159,16 +1156,17 @@ The server recovers the client address from the SIWX token, looks up open channe
         "name": "USDC",
         "version": "2",
         "channelId": "0xdef456...",
-        "cumulativeAmount": "800000",
-        "deposit": "1000000",
-        "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 800000"
+        "chargedCumulativeAmount": "800000",
+        "signedCumulativeAmount": "800000",
+        "signature": "0x...EIP-712 Voucher signature for signedCumulativeAmount 800000",
+        "deposit": "1000000"
       }
     }
   ]
 }
 ```
 
-> Channel state included in 402 — no contract read needed. The client still MUST verify `lastSignature` recovers to its own key for `Voucher(0xdef456..., 800000)` before trusting the server's claimed state ([Client Verification Rules](./scheme_deferred_evm.md#client-verification-rules-must)).
+> Channel state included in 402 — no contract read needed. The client still MUST verify `signature` recovers to its own key for `Voucher(0xdef456..., 800000)` before trusting the server's claimed state ([Client Verification Rules](./scheme_deferred_evm.md#client-verification-rules-must)).
 
 ### Client Verifies and Signs Correct Voucher
 
@@ -1189,9 +1187,10 @@ The server recovers the client address from the SIWX token, looks up open channe
       "name": "USDC",
       "version": "2",
       "channelId": "0xdef456...",
-      "cumulativeAmount": "800000",
-      "deposit": "1000000",
-      "lastSignature": "0x...EIP-712 Voucher signature for cumulativeAmount 800000"
+      "chargedCumulativeAmount": "800000",
+      "signedCumulativeAmount": "800000",
+      "signature": "0x...EIP-712 Voucher signature for signedCumulativeAmount 800000",
+      "deposit": "1000000"
     }
   },
   "payload": {
@@ -1211,9 +1210,12 @@ The server recovers the client address from the SIWX token, looks up open channe
   "success": true,
   "network": "eip155:8453",
   "payer": "0xClientAddress",
+  "amount": "100000",
   "extra": {
     "channelId": "0xdef456...",
-    "cumulativeAmount": "900000",
+    "chargedCumulativeAmount": "900000",
+    "signedCumulativeAmount": "900000",
+    "signature": "0x...EIP-712 Voucher signature for signedCumulativeAmount 900000",
     "deposit": "1000000",
     "settled": "500000",
     "closeRequestedAt": 0
@@ -1221,7 +1223,7 @@ The server recovers the client address from the SIWX token, looks up open channe
 }
 ```
 
-> Channel resumed via SIWX (no discovery roundtrip; client still performed `lastSignature` verification). Subsequent requests proceed as in Lifecycle 1.
+> Channel resumed via SIWX (no discovery roundtrip; client still performed `signature` verification). Subsequent requests proceed as in Lifecycle 1.
 
 ---
 

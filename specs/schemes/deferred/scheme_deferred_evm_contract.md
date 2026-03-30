@@ -48,7 +48,7 @@ Both new functions use `receiveWithAuthorization` (not `transferWithAuthorizatio
          keccak256("Voucher(bytes32 channelId,uint128 cumulativeAmount)");
 
 +    bytes32 public constant CLOSE_AUTHORIZATION_TYPEHASH =
-+        keccak256("CloseAuthorization(bytes32 channelId,uint128 cumulativeAmount)");
++        keccak256("CloseAuthorization(bytes32 channelId,uint128 settleAmount)");
 
 -    uint64 public constant CLOSE_GRACE_PERIOD = 15 minutes;
 +    uint64 public constant CLOSE_GRACE_PERIOD = 60 minutes;
@@ -120,6 +120,7 @@ Both new functions use `receiveWithAuthorization` (not `transferWithAuthorizatio
 +            authorizedSettler: authorizedSettler,
              deposit: deposit,
              settled: 0,
++            lastVoucherCumulativeAmount: 0,
              closeRequestedAt: 0,
              finalized: false
          });
@@ -188,6 +189,7 @@ Both new functions use `receiveWithAuthorization` (not `transferWithAuthorizatio
 +            authorizedSettler: authorizedSettler,
 +            deposit: deposit,
 +            settled: 0,
++            lastVoucherCumulativeAmount: 0,
 +            closeRequestedAt: 0,
 +            finalized: false
 +        });
@@ -208,12 +210,14 @@ Both new functions use `receiveWithAuthorization` (not `transferWithAuthorizatio
      /**
       * @notice Settle funds using a signed voucher.
       * @param channelId The channel to settle
-      * @param cumulativeAmount Total amount authorized by the voucher
+      * @param cumulativeAmount Total amount authorized by the voucher (client-signed max)
++     * @param settleAmount Actual amount to settle (<= cumulativeAmount)
       * @param signature EIP-712 signature from the payer/authorizedSigner
       */
      function settle(
          bytes32 channelId,
          uint128 cumulativeAmount,
++        uint128 settleAmount,
          bytes calldata signature
      )
          external
@@ -227,15 +231,22 @@ Both new functions use `receiveWithAuthorization` (not `transferWithAuthorizatio
          if (channel.payer == address(0)) {
              revert ChannelNotFound();
          }
--        if (msg.sender != channel.payee) {
--            revert NotPayee();
--        }
++        if (settleAmount > cumulativeAmount) {
++            revert SettleAmountExceedsCumulativeAmount();
++        }
          if (cumulativeAmount > channel.deposit) {
              revert AmountExceedsDeposit();
          }
-         if (cumulativeAmount <= channel.settled) {
++        if (settleAmount > channel.deposit) {
++            revert AmountExceedsDeposit();
++        }
+-        if (cumulativeAmount <= channel.settled) {
++        if (settleAmount <= channel.settled) {
              revert AmountNotIncreasing();
          }
++        if (cumulativeAmount <= channel.lastVoucherCumulativeAmount) {
++            revert VoucherAlreadyUsed();
++        }
 
          bytes32 structHash = keccak256(abi.encode(VOUCHER_TYPEHASH, channelId, cumulativeAmount));
          bytes32 digest = _hashTypedData(structHash);
@@ -248,8 +259,11 @@ Both new functions use `receiveWithAuthorization` (not `transferWithAuthorizatio
              revert InvalidSignature();
          }
 
-         uint128 delta = cumulativeAmount - channel.settled;
-         channel.settled = cumulativeAmount;
+-        uint128 delta = cumulativeAmount - channel.settled;
+-        channel.settled = cumulativeAmount;
++        uint128 delta = settleAmount - channel.settled;
++        channel.settled = settleAmount;
++        channel.lastVoucherCumulativeAmount = cumulativeAmount;
 
 -        bool success = ITIP20(channel.token).transfer(channel.payee, delta);
 +        bool success = IERC20(channel.token).transfer(channel.payee, delta);
@@ -258,7 +272,8 @@ Both new functions use `receiveWithAuthorization` (not `transferWithAuthorizatio
          }
 
          emit Settled(
-             channelId, channel.payer, channel.payee, cumulativeAmount, delta, channel.settled
+-            channelId, channel.payer, channel.payee, cumulativeAmount, delta, channel.settled
++            channelId, channel.payer, channel.payee, settleAmount, delta, channel.settled
          );
      }
 
@@ -390,13 +405,16 @@ Both new functions use `receiveWithAuthorization` (not `transferWithAuthorizatio
 +     * @notice Close a channel immediately (requires CloseAuthorization).
       * @dev Settles any outstanding voucher and refunds remainder to payer.
       * @param channelId The channel to close
-      * @param cumulativeAmount Final cumulative amount (0 if no payments)
+-     * @param cumulativeAmount Final cumulative amount (0 if no payments)
++     * @param cumulativeAmount Final cumulative amount from client-signed voucher (0 if no payments)
++     * @param settleAmount Actual amount to settle (<= cumulativeAmount)
       * @param signature EIP-712 signature (empty if cumulativeAmount == 0 or same as settled)
 +     * @param closeAuthorization EIP-712 CloseAuthorization signature from payee or authorizedSettler
       */
      function close(
          bytes32 channelId,
          uint128 cumulativeAmount,
++        uint128 settleAmount,
          bytes calldata signature
 +        bytes calldata closeAuthorization
      )
@@ -415,8 +433,12 @@ Both new functions use `receiveWithAuthorization` (not `transferWithAuthorizatio
 -            revert NotPayee();
 -        }
 +
-+        // Verify CloseAuthorization from payee or authorizedSettler
-+        bytes32 closeHash = keccak256(abi.encode(CLOSE_AUTHORIZATION_TYPEHASH, channelId, cumulativeAmount));
++        if (settleAmount > cumulativeAmount) {
++            revert SettleAmountExceedsCumulativeAmount();
++        }
++
++        // Verify CloseAuthorization signed over settleAmount (the actual earned amount)
++        bytes32 closeHash = keccak256(abi.encode(CLOSE_AUTHORIZATION_TYPEHASH, channelId, settleAmount));
 +        bytes32 closeDigest = _hashTypedData(closeHash);
 +        address closeSigner = ECDSA.recoverCalldata(closeDigest, closeAuthorization);
 +        address expectedCloseSigner =
@@ -433,11 +455,16 @@ Both new functions use `receiveWithAuthorization` (not `transferWithAuthorizatio
          uint128 settledAmount = channel.settled;
          uint128 delta = 0;
 
-        // If cumulativeAmount > settled, validate the voucher
-        if (cumulativeAmount > settledAmount) {
+-        // If cumulativeAmount > settled, validate the voucher
++        // If settleAmount > settled, validate the voucher for cumulativeAmount
+-        if (cumulativeAmount > settledAmount) {
++        if (settleAmount > settledAmount) {
             if (cumulativeAmount > channel.deposit) {
                 revert AmountExceedsDeposit();
             }
++           if (cumulativeAmount <= channel.lastVoucherCumulativeAmount) {
++               revert VoucherAlreadyUsed();
++           }
 
              bytes32 structHash =
                  keccak256(abi.encode(VOUCHER_TYPEHASH, channelId, cumulativeAmount));
@@ -451,12 +478,15 @@ Both new functions use `receiveWithAuthorization` (not `transferWithAuthorizatio
                  revert InvalidSignature();
              }
 
-             delta = cumulativeAmount - settledAmount;
-             settledAmount = cumulativeAmount;
+-             delta = cumulativeAmount - settledAmount;
+-             settledAmount = cumulativeAmount;
++             delta = settleAmount - settledAmount;
++             settledAmount = settleAmount;
          }
 
         // Effects before interactions
-        uint128 refund = deposit - settledAmount;
+-        uint128 refund = deposit - settledAmount;
++        uint128 refund = deposit - settleAmount;
         _clearAndFinalize(channelId);
 
         // Interactions
@@ -592,13 +622,13 @@ Both new functions use `receiveWithAuthorization` (not `transferWithAuthorizatio
 +     */
 +    function getCloseAuthorizationDigest(
 +        bytes32 channelId,
-+        uint128 cumulativeAmount
++        uint128 settleAmount
 +    )
 +        external
 +        view
 +        returns (bytes32)
 +    {
-+        bytes32 structHash = keccak256(abi.encode(CLOSE_AUTHORIZATION_TYPEHASH, channelId, cumulativeAmount));
++        bytes32 structHash = keccak256(abi.encode(CLOSE_AUTHORIZATION_TYPEHASH, channelId, settleAmount));
 +        return _hashTypedData(structHash);
 +    }
 
@@ -647,6 +677,8 @@ A channel opened via `openWithERC3009` has `channel.payer` set to the actual cli
 
 - `InvalidPayer()`: Introduced by `openWithERC3009` (for `payer == address(0)` check). The original `open()` does not need this because `msg.sender` can never be `address(0)`.
 - `InvalidCloseAuthorization()`: Introduced by `close`. Reverts when the `CloseAuthorization` signature does not recover to the expected signer (payee or `authorizedSettler`).
+- `SettleAmountExceedsCumulativeAmount()`: Introduced by `settle` and `close`. Reverts when `settleAmount > cumulativeAmount` — the server cannot settle more than the client authorized.
+- `VoucherAlreadyUsed()`: Introduced by `settle` and `close`. Reverts when `cumulativeAmount <= channel.lastVoucherCumulativeAmount` — prevents a previously settled voucher from being replayed to extract the gap between `settleAmount` and `cumulativeAmount` under dynamic pricing.
 
 ### ERC-3009 Failure Mode
 

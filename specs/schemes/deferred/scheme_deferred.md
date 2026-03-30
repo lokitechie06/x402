@@ -8,6 +8,8 @@ Per-request settlement is appropriate for one-off purchases but introduces per-r
 
 The commitment model — how a commitment is formed, what backs it, and how it is eventually redeemed — is defined entirely by the network binding.
 
+The `deferred` scheme supports **dynamic pricing**: the client commits up to the maximum per-request price (`PaymentRequirements.amount`), but the server may charge a lower actual price after executing the request. The actual charge is communicated via the `PAYMENT-RESPONSE`.
+
 ## Use Cases
 
 - **Micropayment-scale API access.** An AI agent makes thousands of sub-cent API calls per session. The agent signs a commitment per request against a pre-funded session balance. The provider accumulates commitments and redeems them in a single onchain transaction at session end.
