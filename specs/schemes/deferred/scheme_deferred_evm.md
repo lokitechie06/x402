@@ -360,11 +360,14 @@ The server MUST maintain the following per open channel:
 
 ### Request Processing (MUST)
 
+The server MUST serialize the execute-commit cycle **per channel**. Requests on different channels MAY proceed in parallel.
+
 The server MUST NOT update voucher state until the resource handler has succeeded. This ensures the client is never charged for a failed request.
 
 1. **Verify**: Check increment locally, call facilitator `/verify`
-2. **Execute**: Run the resource handler
-3. **Commit** (on success only):
+2. **Try-lock** on `channelId`. If the channel is already locked (another request is executing), reject immediately with `deferred_channel_busy`.
+3. **Execute**: Run the resource handler
+4. **Commit** (on success only):
   - Determine `actualPrice` (the actual charge for this request, `<= PaymentRequirements.amount`)
   - `chargedCumulativeAmount += actualPrice`
   - `signedCumulativeAmount = payload.cumulativeAmount`
@@ -372,7 +375,8 @@ The server MUST NOT update voucher state until the resource handler has succeede
   - `signature = payload.signature`
   - Mirror `deposit`, `settled`, `closeRequestedAt` from the facilitator response
   - Update `lastRequestTimestamp`
-4. **On handler failure**: Return an error without `PAYMENT-RESPONSE`. State is unchanged — the client can retry the same voucher.
+5. **On handler failure**: Return an error without `PAYMENT-RESPONSE`. State is unchanged and the client can retry the same voucher.
+6. **Release lock**
 
 ---
 
@@ -648,6 +652,7 @@ The EVM network binding additionally defines these binding-specific codes:
 | `deferred_evm_payee_mismatch`     | Channel payee does not match `payTo` in requirements                                                                                                                    |
 | `deferred_evm_token_mismatch`     | Channel token does not match `asset` in requirements                                                                                                                    |
 | `session_stale_cumulative_amount` | After channel discovery, client voucher base used onchain `settled`/`lastVoucherNonce` but server holds higher state ([Resume After Discovery](#resume-after-discovery)). |
+| `deferred_channel_busy`           | Another request on this channel is currently executing.                           |
 
 
 ---
