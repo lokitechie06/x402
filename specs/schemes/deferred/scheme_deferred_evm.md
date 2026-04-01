@@ -5,10 +5,11 @@
 The `deferred` scheme on EVM is a **capital-backed** network binding that uses a modified **TempoStreamChannel** contract for onchain escrow, settlement and channel lifecycle management. The client's commitment is backed by onchain capital deposited into the channel contract. Per-request payments are signed as off-chain cumulative vouchers; the server accumulates these and settles onchain at its discretion (batched or on close).
 
 
-| AssetTransferMethod | Use Case                                            | Recommendation                                |
-| ------------------- | --------------------------------------------------- | --------------------------------------------- |
-| `**eip3009`**       | Tokens with `receiveWithAuthorization` (e.g., USDC) | **Recommended** (simplest, truly gasless)     |
-| `**permit2`**       | Tokens without EIP-3009                             | **Universal Fallback** (Works for any ERC-20) |
+| AssetTransferMethod | Use Case                                                        | Recommendation                                           |
+| ------------------- | --------------------------------------------------------------- | -------------------------------------------------------- |
+| **`eip3009`**       | Tokens with `receiveWithAuthorization` (e.g., USDC)             | **Recommended** (simplest, truly gasless)                |
+| **`permit2`**       | Tokens without EIP-3009, payer already has Permit2 approval     | **Universal Fallback** (works for any ERC-20)            |
+| **`eip2612`**       | Tokens with EIP-2612 permit, no prior Permit2 approval by payer | **Gasless Onboarding** (EIP-2612 + Permit2, two sigs)   |
 
 
 Default: `eip3009` if `extra.assetTransferMethod` is omitted.
@@ -33,21 +34,23 @@ The payment channel contract is a unidirectional payment channel where the clien
 ### Contract Interface Summary
 
 
-| Function           | Caller                               | Description                                                                            |
-| ------------------ | ------------------------------------ | -------------------------------------------------------------------------------------- |
-| `open`             | Payer                                | Deposit tokens and create a channel (payer pays gas)                                   |
-| `openWithERC3009`  | Anyone (facilitator)                 | Gasless channel open via ERC-3009 signature                                            |
-| `settle`           | Anyone (valid voucher required)      | Batch-settle funds using signed cumulative vouchers (`VoucherSettlement[]`)             |
-| `topUp`            | Payer                                | Add funds to an existing channel (payer pays gas)                                      |
-| `topUpWithERC3009` | Anyone (facilitator)                 | Gasless top-up via ERC-3009 signature                                                  |
-| `requestClose`     | Payer                                | Begin the grace period for unilateral channel closure                                  |
-| `close`            | Anyone (requires CloseAuthorization) | Close channel with server-signed authorization, settle final voucher, refund remainder |
-| `withdraw`         | Payer                                | Withdraw remaining funds after the close grace period                                  |
+| Function            | Caller                               | Description                                                                            |
+| ------------------- | ------------------------------------ | -------------------------------------------------------------------------------------- |
+| `openWithERC3009`   | Anyone (facilitator)                 | Gasless channel open via ERC-3009 `receiveWithAuthorization` signature                 |
+| `openWithPermit`    | Anyone (facilitator)                 | Gasless channel open via Permit2 `PermitTransferFrom` signature                        |
+| `openWithEIP2612`   | Anyone (facilitator)                 | Gasless channel open via EIP-2612 permit + Permit2 (two signatures)                    |
+| `settle`            | Anyone (valid voucher required)      | Batch-settle funds using signed cumulative vouchers (`VoucherSettlement[]`)             |
+| `topUpWithERC3009`  | Anyone (facilitator)                 | Gasless top-up via ERC-3009 signature                                                  |
+| `topUpWithPermit`   | Anyone (facilitator)                 | Gasless top-up via Permit2 signature                                                   |
+| `topUpWithEIP2612`  | Anyone (facilitator)                 | Gasless top-up via EIP-2612 permit + Permit2 (two signatures)                          |
+| `requestClose`      | Payer                                | Begin the grace period for unilateral channel closure                                  |
+| `close`             | Anyone (requires CloseAuthorization) | Close channel with server-signed authorization, settle final voucher, refund remainder |
+| `withdraw`          | Payer                                | Withdraw remaining funds after the close grace period                                  |
 
 
 In the x402 deferred flow on EVM, the **facilitator** is the sole gas-paying entity:
 
-- **Client** signs ERC-3009 authorizations (off-chain) → facilitator submits `openWithERC3009` / `topUpWithERC3009`
+- **Client** signs token transfer authorizations (off-chain) → facilitator submits `openWith*` / `topUpWith*` depending on the asset transfer method (`eip3009`, `permit2`, or `eip2612`)
 - **Server** forwards vouchers + `CloseAuthorization` signatures to the facilitator → facilitator submits `settle` (no caller restriction) / `close` (with server's `CloseAuthorization`)
 
 > **Requirement**: This contract MUST be deployed to the same address across all supported EVM chains using `CREATE2`.
@@ -168,7 +171,7 @@ When the server can identify the client (e.g. via [sign-in-with-x](../../extensi
 | Field                           | Type     | Required | Description                                                                                                                                                             |
 | ------------------------------- | -------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `extra.authorizedSettler`       | `string` | yes      | Server's close authorization signing address (delegate). If `address(0)`, payee signs close authorizations directly. Used as `authorizedSettler` when opening channels. |
-| `extra.assetTransferMethod`     | `string` | optional | `"eip3009"` (default) or `"permit2"` (future). Omit to use default.                                                                                                     |
+| `extra.assetTransferMethod`     | `string` | optional | `"eip3009"` (default), `"permit2"`, or `"eip2612"`. Omit to use default.                                                                                                |
 | `extra.name`                    | `string` | yes      | EIP-712 domain name of the token contract (e.g., `"USDC"`)                                                                                                              |
 | `extra.version`                 | `string` | yes      | EIP-712 domain version of the token contract (e.g., `"2"`)                                                                                                              |
 | `extra.maxVoucherId`            | `uint8`  | yes      | Maximum `voucherId` the server supports (e.g., `7` for up to 8 concurrent series)                                                                                       |
@@ -188,11 +191,19 @@ After receiving a 402, the client constructs a `PaymentPayload` containing its s
 - `**voucher**`: Channel exists with sufficient balance; client signs a new cumulative voucher
 - `**topUp**`: Channel exists but balance exhausted; client signs a token authorization and voucher
 
-### Asset Transfer Method: EIP-3009
+### Asset Transfer Methods
 
-#### Channel Open: `openWithERC3009()`
+All channel opens and top-ups are indirect — the client signs off-chain authorization(s) and the facilitator submits the transaction. The method depends on `extra.assetTransferMethod`.
 
-The client signs an ERC-3009 `receiveWithAuthorization` for the deposit amount. The facilitator submits the `openWithERC3009()` transaction, paying gas:
+**Authorized Signer** (open only): Allows the client to delegate voucher signing to a different key (e.g., a session key or delegate). If set to `address(0)`, vouchers must be signed by the payer address.
+
+**Authorized Settler** (open only): MUST be set to the server's close authorization delegate address (from `PaymentRequirements.extra.authorizedSettler`). This designates which key must sign `CloseAuthorization` messages to authorize channel closure. If `address(0)`, the payee signs close authorizations directly.
+
+If a close request was pending, any top-up cancels it and the session continues uninterrupted.
+
+#### EIP-3009: `openWithERC3009()` / `topUpWithERC3009()`
+
+The client signs an ERC-3009 `receiveWithAuthorization`. The facilitator submits the transaction, paying gas.
 
 ```solidity
 function openWithERC3009(
@@ -210,14 +221,6 @@ function openWithERC3009(
 ) external returns (bytes32 channelId)
 ```
 
-**Authorized Signer**: Allows the client to delegate voucher signing to a different key (e.g., a session key or delegate). If set to `address(0)`, vouchers must be signed by the payer address.
-
-**Authorized Settler**: MUST be set to the server's close authorization delegate address (from `PaymentRequirements.extra.authorizedSettler`). This designates which key must sign `CloseAuthorization` messages to authorize channel closure. If `address(0)`, the payee signs close authorizations directly.
-
-#### Top-Up: `topUpWithERC3009()`
-
-Same pattern as channel open, only the original payer can authorize additional deposits:
-
 ```solidity
 function topUpWithERC3009(
     bytes32 channelId,          // channel to top up
@@ -229,11 +232,77 @@ function topUpWithERC3009(
 ) external
 ```
 
-If a close request was pending, the top-up cancels it and the session continues uninterrupted.
+#### Permit2: `openWithPermit()` / `topUpWithPermit()`
+
+The client signs a Permit2 `PermitTransferFrom`. Requires the payer to have an existing ERC-20 approval to the Permit2 contract. The facilitator submits the transaction, paying gas.
+
+```solidity
+function openWithPermit(
+    address payer,              // client's address
+    address payee,              // PaymentRequirements.payTo
+    address token,              // PaymentRequirements.asset
+    uint128 deposit,            // ≥ PaymentRequirements.amount
+    bytes32 salt,               // deterministic salt (see Channel Discovery)
+    address authorizedSigner,   // 0x0 to use payer's own address, or a delegate
+    address authorizedSettler,  // PaymentRequirements.extra.authorizedSettler (server delegate)
+    uint256 nonce,              // Permit2 nonce
+    uint256 deadline,           // Permit2 signature deadline
+    bytes calldata signature    // Permit2 PermitTransferFrom signature from payer
+) external returns (bytes32 channelId)
+```
+
+```solidity
+function topUpWithPermit(
+    bytes32 channelId,          // channel to top up
+    uint256 additionalDeposit,  // amount to add (must match Permit2 value)
+    uint256 nonce,              // Permit2 nonce
+    uint256 deadline,           // Permit2 signature deadline
+    bytes calldata signature    // Permit2 PermitTransferFrom signature from payer
+) external
+```
+
+#### EIP-2612 + Permit2: `openWithEIP2612()` / `topUpWithEIP2612()`
+
+For tokens that support EIP-2612 `permit` but where the payer has no prior Permit2 approval. The client signs **two** messages: an EIP-2612 permit (granting the Permit2 contract an ERC-20 allowance on the token) and a Permit2 `PermitTransferFrom` (authorizing the channel contract to pull tokens via Permit2). The contract executes `token.permit()` first, then uses Permit2 to transfer. The facilitator submits the transaction, paying gas.
+
+```solidity
+function openWithEIP2612(
+    address payer,              // client's address
+    address payee,              // PaymentRequirements.payTo
+    address token,              // PaymentRequirements.asset
+    uint128 deposit,            // ≥ PaymentRequirements.amount
+    bytes32 salt,               // deterministic salt (see Channel Discovery)
+    address authorizedSigner,   // 0x0 to use payer's own address, or a delegate
+    address authorizedSettler,  // PaymentRequirements.extra.authorizedSettler (server delegate)
+    uint256 permitDeadline,     // EIP-2612 permit deadline
+    uint8 v,                    // EIP-2612 permit signature v
+    bytes32 r,                  // EIP-2612 permit signature r
+    bytes32 s,                  // EIP-2612 permit signature s
+    uint256 permit2Nonce,       // Permit2 nonce
+    uint256 permit2Deadline,    // Permit2 signature deadline
+    bytes calldata permit2Signature // Permit2 PermitTransferFrom signature from payer
+) external returns (bytes32 channelId)
+```
+
+```solidity
+function topUpWithEIP2612(
+    bytes32 channelId,          // channel to top up
+    uint256 additionalDeposit,  // amount to add
+    uint256 permitDeadline,     // EIP-2612 permit deadline
+    uint8 v,                    // EIP-2612 permit signature v
+    bytes32 r,                  // EIP-2612 permit signature r
+    bytes32 s,                  // EIP-2612 permit signature s
+    uint256 permit2Nonce,       // Permit2 nonce
+    uint256 permit2Deadline,    // Permit2 signature deadline
+    bytes calldata permit2Signature // Permit2 PermitTransferFrom signature from payer
+) external
+```
 
 ### PaymentPayload Examples
 
 **Type: `channelOpen`**
+
+The `channelOpen.authorization` field contains the token transfer authorization, whose shape depends on the asset transfer method. Exactly one of `erc3009Authorization`, `permit2Authorization`, or `eip2612Authorization` MUST be present.
 
 ```json
 {
@@ -261,12 +330,7 @@ If a close request was pending, the top-up cancels it and the session continues 
       "salt": "0x...keccak256(abi.encode('x402-deferred', uint256(0)))",
       "authorizedSigner": "0x0000000000000000000000000000000000000000",
       "authorizedSettler": "0xServerSettlerAddress",
-      "erc3009Authorization": {
-        "validAfter": 0,
-        "validBefore": 1679616000,
-        "nonce": "0x...random nonce",
-        "signature": "0x...ERC-3009 ReceiveWithAuthorization signature from payer"
-      }
+      "authorization": "<erc3009Authorization | permit2Authorization | eip2612Authorization>"
     },
     "voucher": {
       "channelId": "0xabc123...computed channelId",
@@ -275,6 +339,41 @@ If a close request was pending, the top-up cancels it and the session continues 
       "nonce": 1,
       "signature": "0x...EIP-712 voucher signature"
     }
+  }
+}
+```
+
+**Authorization variants:**
+
+```json
+"erc3009Authorization": {
+  "validAfter": 0,
+  "validBefore": 1679616000,
+  "nonce": "0x...random nonce",
+  "signature": "0x...ERC-3009 ReceiveWithAuthorization signature"
+}
+```
+
+```json
+"permit2Authorization": {
+  "nonce": 0,
+  "deadline": 1679616000,
+  "signature": "0x...Permit2 PermitTransferFrom signature"
+}
+```
+
+```json
+"eip2612Authorization": {
+  "permit": {
+    "deadline": 1679616000,
+    "v": 27,
+    "r": "0x...",
+    "s": "0x..."
+  },
+  "permit2": {
+    "nonce": 0,
+    "deadline": 1679616000,
+    "signature": "0x...Permit2 PermitTransferFrom signature"
   }
 }
 ```
@@ -311,6 +410,8 @@ If a close request was pending, the top-up cancels it and the session continues 
 
 **Type: `topUp`**
 
+The `topUp.authorization` field uses the same variant union as `channelOpen` (exactly one of `erc3009Authorization`, `permit2Authorization`, or `eip2612Authorization`).
+
 ```json
 {
   "x402Version": 2,
@@ -332,12 +433,7 @@ If a close request was pending, the top-up cancels it and the session continues 
     "topUp": {
       "channelId": "0xabc123...channelId",
       "additionalDeposit": "50000",
-      "erc3009Authorization": {
-        "validAfter": 0,
-        "validBefore": 1679616000,
-        "nonce": "0x...random nonce",
-        "signature": "0x...ERC-3009 ReceiveWithAuthorization signature from payer"
-      }
+      "authorization": "<erc3009Authorization | permit2Authorization | eip2612Authorization>"
     },
     "voucher": {
       "channelId": "0xabc123...channelId",
@@ -450,8 +546,8 @@ Performs onchain operations. The facilitator infers the action from the payload:
 
 | `settleAction` | Payload Type  | Onchain Operation                                                     | When Used                                        |
 | -------------- | ------------- | --------------------------------------------------------------------- | ------------------------------------------------ |
-| `"open"`       | `channelOpen` | `openWithERC3009()`                                                   | First request — server opens the channel         |
-| `"topUp"`      | `topUp`       | `topUpWithERC3009()`                                                  | Client sent a top-up payload                     |
+| `"open"`       | `channelOpen` | `openWith{ERC3009,Permit,EIP2612}()` (per authorization variant)      | First request — server opens the channel         |
+| `"topUp"`      | `topUp`       | `topUpWith{ERC3009,Permit,EIP2612}()` (per authorization variant)     | Client sent a top-up payload                     |
 | `"settle"`     | `voucher`     | `settle(channelId, VoucherSettlement[])`                              | Server batches settlement at its discretion      |
 | `"close"`      | `voucher`     | `close(channelId, VoucherSettlement[], closeAuth)`                    | Client requested close or server-initiated close |
 
@@ -505,8 +601,8 @@ Performs onchain operations. The facilitator infers the action from the payload:
 
 **Settlement Logic:**
 
-- `**channelOpen`**: Submit `openWithERC3009()` using `payload.channelOpen` parameters. Returns the `channelId` and transaction hash.
-- `**topUp`**: Submit `topUpWithERC3009()` using `payload.topUp` parameters. Returns the transaction hash.
+- `**channelOpen`**: Submit the appropriate `openWith*()` variant based on `payload.channelOpen.authorization` (ERC-3009 → `openWithERC3009`, Permit2 → `openWithPermit`, EIP-2612 → `openWithEIP2612`). Returns the `channelId` and transaction hash.
+- `**topUp`**: Submit the appropriate `topUpWith*()` variant based on `payload.topUp.authorization`. Returns the transaction hash.
 - `**voucher`**: Submit `settle(channelId, VoucherSettlement[])` with one or more voucher entries. Each entry settles independently per `(channelId, voucherId)`. The contract verifies each voucher signature, accumulates the total delta, and updates `channel.totalSettled`.
 - `**voucher` + `requestClose: true`**: Submit `close(channelId, VoucherSettlement[], closeAuthorization)` with the `CloseAuthorization` signature from the server. The `CloseAuthorization` is signed over the final `totalSettleAmount` (= `channel.totalSettled` after processing all vouchers). The contract settles, then refunds `deposit - totalSettleAmount` to the payer.
 

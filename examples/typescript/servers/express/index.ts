@@ -38,6 +38,11 @@ app.use(
             price: "$0.001",
             network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
             payTo: svmAddress,
+            extra: {
+              assetTransferMethod: "eip3009",
+              function: "receiveWithAuthorization",
+              //////////////////////////
+            }
           },
         ],
         description: "Weather data",
